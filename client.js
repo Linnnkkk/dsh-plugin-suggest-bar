@@ -47,9 +47,12 @@ window.__ModuleLoader__.load({
 			+ ".dsh-suggest-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}"
 			+ ".dsh-suggest-icon{flex:none;display:inline-flex;color:var(--dsw-alias-accent, #c96442);}"
 			+ ".dsh-suggest-label{flex:none;font-weight:600;font-size:12px;color:var(--dsw-alias-accent, #c96442);}"
-			+ ".dsh-suggest-cycle{flex:none;font:inherit;font-size:11px;line-height:1;padding:2px 6px;margin-right:2px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));background:transparent;color:inherit;opacity:.7;cursor:pointer;}"
-			+ ".dsh-suggest-cycle:hover{opacity:1;border-color:var(--dsw-alias-accent, #c96442);}"
-			+ ".dsh-suggest-cycle:disabled{opacity:.35;cursor:default;}"
+			// 换一条：做成明确的按钮（强调色描边+浅底+图标），不能让人以为只是「第1/共3」的标签
+			+ ".dsh-suggest-cycle{flex:none;display:inline-flex;align-items:center;gap:4px;font:inherit;font-size:12px;font-weight:500;line-height:1;padding:4px 9px;border-radius:8px;cursor:pointer;border:1px solid var(--dsw-alias-accent, #c96442);background:rgba(217,119,87,.12);color:var(--dsw-alias-accent, #c96442);transition:background .12s ease,border-color .12s ease,transform .08s ease;}"
+			+ ".dsh-suggest-cycle:hover{background:rgba(217,119,87,.26);}"
+			+ ".dsh-suggest-cycle:active{transform:scale(.96);}"
+			+ ".dsh-suggest-cycle:disabled{opacity:.4;cursor:default;}"
+			+ ".dsh-suggest-cycle-icon{font-size:13px;line-height:1;}"
 			+ ".dsh-suggest-text{flex:1 1 14em;min-width:0;overflow-wrap:break-word;}"
 			+ ".dsh-suggest-actions{display:flex;align-items:center;gap:8px;margin-left:auto;}"
 			+ ".dsh-suggest-btn{border:none;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:12px;font-weight:500;"
@@ -221,7 +224,7 @@ window.__ModuleLoader__.load({
 							className: "dsh-suggest-cycle", type: "button", disabled: folded,
 							title: "换一条建议", "aria-label": `换一条建议（第 ${index + 1} 条，共 ${total} 条）`,
 							onClick: onCycle,
-						}, `${index + 1}/${total}`)
+						}, el("span", { className: "dsh-suggest-cycle-icon" }, "⇄"), `${index + 1}/${total}`)
 						: null,
 					el("span", { className: "dsh-suggest-text" }, text),
 					el("span", { className: "dsh-suggest-actions" },
