@@ -47,6 +47,9 @@ window.__ModuleLoader__.load({
 			+ ".dsh-suggest-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}"
 			+ ".dsh-suggest-icon{flex:none;display:inline-flex;color:var(--dsw-alias-accent, #c96442);}"
 			+ ".dsh-suggest-label{flex:none;font-weight:600;font-size:12px;color:var(--dsw-alias-accent, #c96442);}"
+			+ ".dsh-suggest-cycle{flex:none;font:inherit;font-size:11px;line-height:1;padding:2px 6px;margin-right:2px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));background:transparent;color:inherit;opacity:.7;cursor:pointer;}"
+			+ ".dsh-suggest-cycle:hover{opacity:1;border-color:var(--dsw-alias-accent, #c96442);}"
+			+ ".dsh-suggest-cycle:disabled{opacity:.35;cursor:default;}"
 			+ ".dsh-suggest-text{flex:1 1 14em;min-width:0;overflow-wrap:break-word;}"
 			+ ".dsh-suggest-actions{display:flex;align-items:center;gap:8px;margin-left:auto;}"
 			+ ".dsh-suggest-btn{border:none;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:12px;font-weight:500;"
@@ -195,7 +198,7 @@ window.__ModuleLoader__.load({
 			el("path", { d: "M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" }));
 
 		/** 建议卡本体（主题变量 + 底角方半径 + 折叠动画）。 */
-		function SuggestCard({ text, label, folded, onUse, onSend, onDismiss }) {
+		function SuggestCard({ text, label, folded, onUse, onSend, onDismiss, index, total, onCycle }) {
 			return el("div", {
 				className: "dsh-suggest-card",
 				"data-folded": folded ? "" : undefined,
@@ -205,6 +208,13 @@ window.__ModuleLoader__.load({
 				el("div", { className: "dsh-suggest-row" },
 					el("span", { className: "dsh-suggest-icon" }, SPARK),
 					el("span", { className: "dsh-suggest-label" }, label),
+					total > 1
+						? el("button", {
+							className: "dsh-suggest-cycle", type: "button", disabled: folded,
+							title: "换一条建议", "aria-label": `换一条建议（第 ${index + 1} 条，共 ${total} 条）`,
+							onClick: onCycle,
+						}, `${index + 1}/${total}`)
+						: null,
 					el("span", { className: "dsh-suggest-text" }, text),
 					el("span", { className: "dsh-suggest-actions" },
 						el("button", { className: "dsh-suggest-btn primary", type: "button", disabled: folded, onClick: onUse }, "采用"),
@@ -220,16 +230,27 @@ window.__ModuleLoader__.load({
 			const suggestion = useSuggestion(sessionId);
 			const draft = useDraft(sessionId);
 			const [dismissedTurn, setDismissedTurn] = react.useState(-1);
+			const [pick, setPick] = react.useState(0);
+			const texts = suggestion !== null && Array.isArray(suggestion.texts) ? suggestion.texts : [];
+			const stamp = suggestion !== null ? `${suggestion.turn}:${texts.join("|")}` : "";
+			// 新一批建议到达 → 回到第一条
+			react.useEffect(() => { setPick(0); }, [stamp]);
 			useStyle();
-			if (suggestion === null || sessionId === undefined) return null;
+			if (suggestion === null || sessionId === undefined || texts.length === 0) return null;
 			const folded = draft.trim() !== "" || suggestion.turn === dismissedTurn;
 			const label = typeof suggestion.label === "string" && suggestion.label !== "" ? suggestion.label : "建议";
+			const index = Math.min(pick, texts.length - 1);
+			const current = texts[index];
 			const adopt = () => {
-				if (inputActions && typeof inputActions.setDraft === "function") inputActions.setDraft(suggestion.text);
+				if (inputActions && typeof inputActions.setDraft === "function") inputActions.setDraft(current);
 			};
-			const send = () => sendAsUser(sessionId, suggestion.text);
+			const send = () => sendAsUser(sessionId, current);
 			const close = () => setDismissedTurn(suggestion.turn);
-			return el(SuggestCard, { text: suggestion.text, label, folded, onUse: adopt, onSend: send, onDismiss: close });
+			const cycle = () => setPick((prev) => (prev + 1) % texts.length);
+			return el(SuggestCard, {
+				text: current, label, folded, onUse: adopt, onSend: send, onDismiss: close,
+				index, total: texts.length, onCycle: cycle,
+			});
 		}
 
 		// ================= 设置面板（settings.section 槽 + 自有配置路由） =================

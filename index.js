@@ -70,7 +70,12 @@ function loadStore() {
 	try {
 		const data = JSON.parse(readFileSync(STORE_PATH, 'utf8'));
 		for (const [id, s] of Object.entries(data ?? {})) {
-			if (s && Number.isInteger(s.turn) && typeof s.text === 'string' && s.text !== '') store.set(id, { turn: s.turn, text: s.text });
+			if (!s || !Number.isInteger(s.turn)) continue;
+			// 兼容旧格式（单条 text）与新格式（texts 数组）
+			const texts = Array.isArray(s.texts)
+				? s.texts.filter((t) => typeof t === 'string' && t !== '')
+				: (typeof s.text === 'string' && s.text !== '' ? [s.text] : []);
+			if (texts.length > 0) store.set(id, { turn: s.turn, texts });
 		}
 	} catch { /* 首启或文件损坏：从空开始 */ }
 }
@@ -182,19 +187,14 @@ function noteTurn(sessionId, key, text) {
  * v2 提示词（2026-11-12 在 72 条真实会话样本上评测选出）：
  * 现行版爱出“好”“谢谢整理”这类空话；只加细节的版本又太长、爱把几件事串起来、编造细节。
  */
-function systemPrompt(maxChars) {
+function systemPrompt() {
 	return [
-		'你替用户预先写好他在 AI 编程助手里要发的下一条消息，显示在输入框上方，用户一点就发出。',
-		'先看助手这一轮怎么结束的：',
-		'- 在问用户、给了选项或推荐、在等确认 → 替用户简短回答。助手有推荐时多半就是同意推荐（如“好，按 A 来”“可以，提交吧”）。',
-		'- 说已经做完 → 用户多半去验证、提出顺理成章的下一步，或收尾（“行，先这样”）。',
-		'- 说失败、卡住、有遗留 → 让它接着处理那件具体的事。',
-		'写法：',
-		'- 用户本人的口吻：口语、直接，不用“请”“谢谢”“您”；照他之前消息的说话方式。',
-		'- 只说一件事，越短越好，通常 4～25 个字。不要用“另外”“顺便”把几件事串在一起。',
-		'- 只用对话里出现过的东西，不编造文件名、数字或细节；拿不准细节就说得概括一点。',
-		'- 不重复用户已经提过的要求，不替助手说话。',
-		`- 只输出这一句话，不超过 ${maxChars} 个字，不加引号和解释。`,
+		'你替用户预写他下一条要发的消息。只写用户自己会发的可执行指令（批准、纠正、要求下一步、解释/诊断，或简短结果后跟指令）。纯状态汇报、日志观察、对结果的猜测不要写。',
+		'模仿用户最近几条真实消息的口吻：口语、直接、短，能 10 个字说完不用 20 个字。',
+		'助手在问用户/给选项 → 同意推荐；助手做完 → 验证或顺理成章的下一步；助手失败/卡住/有遗留 → 让它接着处理那件具体的事。',
+		'不要写助手刚做完的事，不要替助手说话，不要用“另外”“顺便”串多件事。',
+		'输出 1–3 行，每行一条，按可能性从高到低排列。只写有把握的，不要凑数。不要序号、标记、引号、Markdown、解释。',
+		'如果一条都没把握，只输出 NONE，单独一行，不要和其他内容混排。',
 	].join('\n');
 }
 
@@ -234,17 +234,27 @@ function frame(t, maxBytes) {
 }
 
 /** 清洗为“一句用户口吻的话”；非空即可（“好”“嗯”这类一字真言是合法预测）。 */
-function cleanSuggestion(raw, maxChars) {
-	let s = String(raw ?? '');
-	s = s.replace(/```[\s\S]*?```/g, ' ').trim();
-	s = s.replace(/^[「『"'（(\[]+/, '').replace(/[」』"'）)\]]+$/, '').trim();
-	s = s.replace(/\s+/g, ' ').trim();
-	if (s.length === 0) return '';
-	// 助手腔过滤：预测的应是用户说的话，不是 AI 自述
-	if (/^(作为|我是|作为一个|I am|As an? |Based on)/i.test(s)) return '';
-	if (/^(用户|我方|下一句|建议)[:：]/.test(s)) return '';
-	if (s.length > maxChars) s = s.slice(0, maxChars);
-	return s;
+/** 按行解析模型输出：一行一条，最多 3 条；NONE / 助手腔 / markdown 行一律丢弃。 */
+function cleanSuggestions(raw, maxChars) {
+	const out = [];
+	const lines = String(raw ?? '').replace(/```[\s\S]*?```/g, '\n').split(/\r?\n/);
+	for (const line of lines) {
+		let t = line.trim();
+		if (t === '') continue;
+		// 去序号、列表符号、包裹引号（提示词要求不要，这里兜底）
+		t = t.replace(/^[-*+•]\s+/, '').replace(/^\d+[.、)]\s*/, '');
+		t = t.replace(/^[「『"'（(\[]+/, '').replace(/[」』"'）)\]]+$/, '').trim();
+		if (t === '') continue;
+		if (/^NONE$/i.test(t)) continue; // 单独一行 NONE = 没把握，不出建议
+		if (/^\|.*\|$/.test(t) || /^#{1,6}\s/.test(t)) continue; // 表格 / 标题
+		// 助手腔：预测的应是用户说的话
+		if (/^(作为|我是|作为一个|I am|As an? |Based on)/i.test(t)) continue;
+		if (/^(用户|我方|下一句|建议|让我|我来|下面|以下|根据上述|总结)[:：]?/.test(t) && t.length > 12) continue;
+		if (t.length > maxChars) t = t.slice(0, maxChars);
+		out.push(t);
+		if (out.length >= 3) break;
+	}
+	return out;
 }
 
 async function generate(ctx, seedConfig, session, turn) {
@@ -309,7 +319,7 @@ async function generate(ctx, seedConfig, session, turn) {
 				provider: route.provider,
 				model: route.model,
 				messages,
-				system: systemPrompt(config.maxSuggestionChars),
+				system: systemPrompt(),
 				// 关思考时一句话 256 足够；只能带思考的模型需给推理留余量，否则必撞 max-tokens
 				maxTokens: effort === 'off' ? config.maxOutputTokens : Math.max(config.maxOutputTokens, 1024),
 				sessionId: session.id,
@@ -337,10 +347,11 @@ async function generate(ctx, seedConfig, session, turn) {
 			}
 		}
 		if (blocks === undefined && attemptError !== undefined) throw attemptError;
-		const raw = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ');
-		const text = cleanSuggestion(raw, config.maxSuggestionChars);
-		if (config.debug) dbg('generate: result', { rawLen: raw.length, textLen: text.length, text: text.slice(0, 60) });
-		if (text !== '') setSuggestion(session.id, { turn, text });
+		// 多行解析：必须按换行保留边界，不能用空格拼接
+		const raw = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n');
+		const texts = cleanSuggestions(raw, config.maxSuggestionChars);
+		if (config.debug) dbg('generate: result', { rawLen: raw.length, count: texts.length, texts: texts.map((t) => t.slice(0, 40)) });
+		if (texts.length > 0) setSuggestion(session.id, { turn, texts });
 		else dropSuggestion(session.id);
 	} catch (error) {
 		dropSuggestion(session.id);
@@ -434,7 +445,7 @@ function apply(ctx, config) {
 			let suggestion = null;
 			if (sessionId !== undefined && !running.get(sessionId)) {
 				const s = store.get(sessionId);
-				if (s !== undefined) suggestion = { turn: s.turn, text: s.text, label: loadConfig(config).labelText };
+				if (s !== undefined) suggestion = { turn: s.turn, texts: s.texts, label: loadConfig(config).labelText };
 			}
 			return Response.json({ suggestion });
 		},
