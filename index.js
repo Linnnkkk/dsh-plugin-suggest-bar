@@ -551,6 +551,7 @@ function apply(ctx, config) {
 			if (typeof body.model === 'string') patch.model = body.model;
 			if (typeof body.labelText === 'string') patch.labelText = body.labelText;
 			if (Array.isArray(body.skipProviders)) patch.skipProviders = body.skipProviders;
+			if (Array.isArray(body.stripLinePrefixes)) patch.stripLinePrefixes = body.stripLinePrefixes.filter((x) => typeof x === 'string' && x !== '');
 			for (const key of ['timeoutMs', 'maxOutputTokens', 'maxSuggestionChars', 'maxInputBytes']) {
 				if (body[key] !== undefined) patch[key] = body[key];
 			}

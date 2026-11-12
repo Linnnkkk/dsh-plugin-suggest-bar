@@ -569,6 +569,12 @@ window.__ModuleLoader__.load({
 					hint: "这些 provider 的会话不生成建议",
 					cfg, update, providerOptions,
 				}),
+				el(TextField, {
+					label: "去噪前缀",
+					hint: "逗号分隔；助手回复中以这些词开头的行，拼输入前会丢掉（留空=不丢任何行）",
+					field: "stripLinePrefixes", list: true, cfg, update,
+					placeholder: "留空表示不过滤",
+				}),
 				el(NumberField, { label: "总超时(ms)", field: "timeoutMs", cfg, update, min: 1000 }),
 				el(NumberField, { label: "输出 token 上限", field: "maxOutputTokens", cfg, update, min: 16 }),
 				el(NumberField, { label: "建议最大字符数", field: "maxSuggestionChars", cfg, update, min: 10 }),
