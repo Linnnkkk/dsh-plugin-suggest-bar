@@ -16,7 +16,7 @@
  *
  * 刻意的取舍：不写自定义会话事件（宿主事件校验会拒载整本日志）；建议持久化到独立 suggestions.json 而非会话日志。
  */
-import { readFileSync, writeFileSync, statSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import z from '@deepseek-ai/schemastery';
 import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -28,6 +28,8 @@ const OPTIONS_ROUTE_PATH = '/api/suggest-bar/options';
 const PURPOSE = 'suggest-bar';
 const CONFIG_PATH = fileURLToPath(new URL('./config.json', import.meta.url));
 const STORE_PATH = fileURLToPath(new URL('./suggestions.json', import.meta.url));
+const DEBUG_PATH = fileURLToPath(new URL('./debug.log', import.meta.url));
+const DEBUG_MAX_BYTES = 2 * 1024 * 1024; // 超过就重开，避免无界增长
 const STORE_MAX = 200;         // 持久化上限：只保留最近 N 个会话的建议
 
 /** 服务依赖：loader 等 llm 与 connection 就绪后才装配本插件（对齐 dsh-suggest-ghost）。 */
@@ -103,7 +105,16 @@ function dropSuggestion(sessionId) {
 }
 
 /** 直写 stdout（dsh.log）的调试探针——不依赖 ctx.logger（实测 warn 不落盘）。 */
-const dbg = (...args) => console.log('[suggest-bar]', ...args);
+/** 调试探针：同时写 stdout 与插件目录 debug.log（DSH 的 stdout 走 supervisord pipe，读不到）。 */
+const dbg = (...args) => {
+	console.log('[suggest-bar]', ...args);
+	try {
+		if (statSync(DEBUG_PATH).size > DEBUG_MAX_BYTES) writeFileSync(DEBUG_PATH, '');
+	} catch { /* 文件还不存在 */ }
+	try {
+		appendFileSync(DEBUG_PATH, `[${new Date().toISOString()}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}\n`, 'utf8');
+	} catch { /* 写不动就算了，调试不影响主流程 */ }
+};
 
 /** 任意来源（yml / config.json / 路由 patch）→ 规整后的有效配置。 */
 function resolveConfig(c) {
@@ -193,7 +204,7 @@ function systemPrompt() {
 		'模仿用户最近几条真实消息的口吻：口语、直接、短，能 10 个字说完不用 20 个字。',
 		'助手在问用户/给选项 → 同意推荐；助手做完 → 验证或顺理成章的下一步；助手失败/卡住/有遗留 → 让它接着处理那件具体的事。',
 		'不要写助手刚做完的事，不要替助手说话，不要用“另外”“顺便”串多件事。',
-		'输出 1–3 行，每行一条，按可能性从高到低排列。只写有把握的，不要凑数。不要序号、标记、引号、Markdown、解释。',
+		'输出 1–3 行，每行一条，按可能性从高到低排列。尽可能给满 3 条，覆盖不同方向（同意/继续/纠正/追问下一步），但不要同一句话换个说法凑数。不要序号、标记、引号、Markdown、解释。',
 		'如果一条都没把握，只输出 NONE，单独一行，不要和其他内容混排。',
 	].join('\n');
 }
