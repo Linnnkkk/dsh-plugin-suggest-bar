@@ -47,12 +47,8 @@ window.__ModuleLoader__.load({
 			+ ".dsh-suggest-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}"
 			+ ".dsh-suggest-icon{flex:none;display:inline-flex;color:var(--dsw-alias-accent, #c96442);}"
 			+ ".dsh-suggest-label{flex:none;font-weight:600;font-size:12px;color:var(--dsw-alias-accent, #c96442);}"
-			// 换一条：做成明确的按钮（强调色描边+浅底+图标），不能让人以为只是「第1/共3」的标签
-			+ ".dsh-suggest-cycle{flex:none;display:inline-flex;align-items:center;gap:4px;font:inherit;font-size:12px;font-weight:500;line-height:1;padding:4px 9px;border-radius:8px;cursor:pointer;border:1px solid var(--dsw-alias-accent, #c96442);background:rgba(217,119,87,.12);color:var(--dsw-alias-accent, #c96442);transition:background .12s ease,border-color .12s ease,transform .08s ease;}"
-			+ ".dsh-suggest-cycle:hover{background:rgba(217,119,87,.26);}"
-			+ ".dsh-suggest-cycle:active{transform:scale(.96);}"
-			+ ".dsh-suggest-cycle:disabled{opacity:.4;cursor:default;}"
-			+ ".dsh-suggest-cycle-icon{font-size:13px;line-height:1;}"
+			// 换一条：沿用 .dsh-suggest-btn 的视觉，只让计数等宽避免切换时抖动
+			+ ".dsh-suggest-cycle{font-variant-numeric:tabular-nums;white-space:nowrap;}"
 			+ ".dsh-suggest-text{flex:1 1 14em;min-width:0;overflow-wrap:break-word;}"
 			+ ".dsh-suggest-actions{display:flex;align-items:center;gap:8px;margin-left:auto;}"
 			+ ".dsh-suggest-btn{border:none;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:12px;font-weight:500;"
@@ -219,15 +215,15 @@ window.__ModuleLoader__.load({
 				el("div", { className: "dsh-suggest-row" },
 					el("span", { className: "dsh-suggest-icon" }, SPARK),
 					el("span", { className: "dsh-suggest-label" }, label),
-					total > 1
-						? el("button", {
-							className: "dsh-suggest-cycle", type: "button", disabled: folded,
-							title: "换一条建议", "aria-label": `换一条建议（第 ${index + 1} 条，共 ${total} 条）`,
-							onClick: onCycle,
-						}, el("span", { className: "dsh-suggest-cycle-icon" }, "⇄"), `${index + 1}/${total}`)
-						: null,
 					el("span", { className: "dsh-suggest-text" }, text),
 					el("span", { className: "dsh-suggest-actions" },
+						total > 1
+							? el("button", {
+								className: "dsh-suggest-btn dsh-suggest-cycle", type: "button", disabled: folded,
+								title: "换一条建议", "aria-label": `换一条建议（第 ${index + 1} 条，共 ${total} 条）`,
+								onClick: onCycle,
+							}, "⇄ ", `${index + 1}/${total}`)
+							: null,
 						el("button", { className: "dsh-suggest-btn primary", type: "button", disabled: folded, onClick: onUse }, "采用"),
 						el("button", { className: "dsh-suggest-btn", type: "button", disabled: folded, onClick: onSend }, "发送"),
 						el("button", { className: "dsh-suggest-x", type: "button", "aria-label": "关闭建议", title: "关闭", disabled: folded, onClick: onDismiss }, "✕"),
