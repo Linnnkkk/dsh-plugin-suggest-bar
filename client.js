@@ -222,7 +222,7 @@ window.__ModuleLoader__.load({
 								className: "dsh-suggest-btn dsh-suggest-cycle", type: "button", disabled: folded,
 								title: "换一条建议", "aria-label": `换一条建议（第 ${index + 1} 条，共 ${total} 条）`,
 								onClick: onCycle,
-							}, "⇄ ", `${index + 1}/${total}`)
+							}, `${index + 1}/${total}`)
 							: null,
 						el("button", { className: "dsh-suggest-btn primary", type: "button", disabled: folded, onClick: onUse }, "采用"),
 						el("button", { className: "dsh-suggest-btn", type: "button", disabled: folded, onClick: onSend }, "发送"),
