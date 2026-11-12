@@ -132,10 +132,18 @@ window.__ModuleLoader__.load({
 						.then((r) => r.json())
 						.then((body) => {
 							if (cancelled) return;
-							const s = body && typeof body === "object" && body.suggestion && typeof body.suggestion === "object"
-								&& typeof body.suggestion.text === "string" && body.suggestion.text.trim() !== ""
-								&& Number.isInteger(body.suggestion.turn) ? body.suggestion : null;
-							setState((prev) => (prev !== null && s !== null && prev.turn === s.turn && prev.text === s.text) || (prev === null && s === null) ? prev : s);
+							const sug = body && typeof body === "object" ? body.suggestion : null;
+							const s = sug && typeof sug === "object"
+								&& Array.isArray(sug.texts) && sug.texts.length > 0
+								&& sug.texts.every((t) => typeof t === "string" && t.trim() !== "")
+								&& Number.isInteger(sug.turn) ? sug : null;
+							setState((prev) => {
+								if (prev === null && s === null) return prev;
+								if (prev !== null && s !== null && prev.turn === s.turn
+									&& prev.texts.length === s.texts.length
+									&& prev.texts.every((t, i) => t === s.texts[i])) return prev;
+								return s;
+							});
 						})
 						.catch(() => {})
 						.finally(() => { pending = false; });
