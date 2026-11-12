@@ -21,6 +21,7 @@ window.__ModuleLoader__.load({
 		const ROUTE = "/api/suggest-bar";
 		const CONFIG_ROUTE = "/api/suggest-bar/config";
 		const OPTIONS_ROUTE = "/api/suggest-bar/options";
+		const EFFORT_TEST_ROUTE = "/api/suggest-bar/test-effort";
 		const POLL_MS = 700;
 		const STYLE_ID = "dsh-suggest-bar-style";
 		const inject = ["slots"];
@@ -73,6 +74,11 @@ window.__ModuleLoader__.load({
 			+ ".dsh-sb-pick{display:flex;align-items:center;gap:6px;flex:1 1 220px;min-width:0;}"
 			+ ".dsh-sb-pick .dsh-sb-input{flex:1 1 auto;}"
 			+ ".dsh-sb-manual{flex:none;border:none;background:none;cursor:pointer;font-size:13px;opacity:.5;padding:2px 4px;}"
+			+ ".dsh-sb-test{flex:none;border:1px solid var(--dsw-alias-accent, #c96442);background:rgba(217,119,87,.10);color:var(--dsw-alias-accent, #c96442);"
+			+ "border-radius:8px;padding:4px 12px;cursor:pointer;font-size:12.5px;font-weight:500;}"
+			+ ".dsh-sb-test:hover{background:rgba(217,119,87,.22);}"
+			+ ".dsh-sb-test:disabled{opacity:.5;cursor:default;}"
+			+ ".dsh-sb-testmsg{flex:1 1 100%;font-size:12px;opacity:.8;}"
 			+ ".dsh-sb-manual:hover{opacity:1;}"
 			+ ".dsh-sb-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1 1 220px;}"
 			+ ".dsh-sb-chip{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 6px 2px 10px;"
@@ -483,6 +489,8 @@ window.__ModuleLoader__.load({
 			const { cfg, update, savedOn } = usePluginConfig();
 			const hostProviders = usePluginOptions();
 			const dirGroups = useModelDirectory();
+			const [testing, setTesting] = react.useState(false);
+			const [testMsg, setTestMsg] = react.useState("");
 			useStyle();
 			if (cfg === null) {
 				return el("div", { className: "dsh-sb-card" }, el("span", { className: "dsh-sb-hint" }, "加载配置中…"));
@@ -523,6 +531,39 @@ window.__ModuleLoader__.load({
 					value: cfg.model, placeholder: "跟随会话路由",
 					options: modelOptions, onChange: (v) => update({ model: v }),
 				}),
+				el("div", { className: "dsh-sb-row" },
+					el("label", null, "思考档位"),
+					el("select", {
+						className: "dsh-sb-input", value: cfg.effort ?? "auto",
+						onChange: (e) => update({ effort: e.target.value }),
+					},
+						el("option", { value: "auto", key: "auto" }, "自动探测"),
+						el("option", { value: "off", key: "off" }, "off（关思考，最省）"),
+						el("option", { value: "low", key: "low" }, "low（低思考）"),
+						el("option", { value: "none", key: "none" }, "不传（模型默认）"),
+					),
+					el("button", {
+						className: "dsh-sb-test", type: "button", disabled: testing,
+						onClick: () => {
+							setTesting(true); setTestMsg("");
+							fetch(EFFORT_TEST_ROUTE, {
+								method: "POST", headers: { "content-type": "application/json" },
+								body: JSON.stringify({ provider: cfg.provider, model: cfg.model }),
+							})
+								.then((r) => r.json())
+								.then((b) => {
+									if (b && b.ok) {
+										update({ effort: b.effort });
+										setTestMsg(`✓ 这个模型可用：${b.effort}（已写入设置，下次生成直接用）`);
+									} else setTestMsg(`✗ 测试失败：${(b && b.error) || "未知错误"}`);
+								})
+								.catch((e) => setTestMsg(`✗ ${e && e.message ? e.message : "请求失败"}`))
+								.finally(() => setTesting(false));
+						},
+					}, testing ? "测试中…" : "测试"),
+					el("span", { className: "dsh-sb-testmsg" },
+						testMsg !== "" ? testMsg : "点「测试」会真发一次极短请求，依次试 off / low / 不传，把能用的档位写进设置（只需测一次）"),
+				),
 				el(SkipField, {
 					label: "跳过的 provider",
 					hint: "这些 provider 的会话不生成建议",

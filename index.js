@@ -25,6 +25,7 @@ const name = 'dsh-plugin-suggest-bar';
 const ROUTE_PATH = '/api/suggest-bar';
 const CONFIG_ROUTE_PATH = '/api/suggest-bar/config';
 const OPTIONS_ROUTE_PATH = '/api/suggest-bar/options';
+const EFFORT_TEST_ROUTE_PATH = '/api/suggest-bar/test-effort';
 const PURPOSE = 'suggest-bar';
 const CONFIG_PATH = fileURLToPath(new URL('./config.json', import.meta.url));
 const STORE_PATH = fileURLToPath(new URL('./suggestions.json', import.meta.url));
@@ -48,6 +49,8 @@ const Config = z.object({
 	maxInputBytes: z.natural().min(512).default(10240),
 	/** 生成时机：always=每回合都生成；when-active=只有该对话在前台时才生成（省 token）。 */
 	generateMode: z.string().default('always'),
+	/** 思考档位：auto=自动探测；off / low=固定；none=不传该字段。设置面板「测试」会自动写入。 */
+	effort: z.string().default('auto'),
 	debug: z.boolean().default(false),
 });
 
@@ -136,6 +139,7 @@ function resolveConfig(c) {
 		maxSuggestionChars: numOr(c?.maxSuggestionChars, 120, 10),
 		maxInputBytes: numOr(c?.maxInputBytes, 10240, 512),
 		generateMode: c?.generateMode === 'when-active' ? 'when-active' : 'always',
+		effort: ['off', 'low', 'none'].includes(c?.effort) ? c.effort : 'auto',
 		debug: c?.debug === true,
 	};
 }
@@ -376,8 +380,10 @@ async function generate(ctx, seedConfig, session, turn) {
 		let attemptError;
 		outer:
 		for (const route of routeCandidates) {
-			// 先问这个模型支持哪些思考档（缓存），拿到就直接用最省那档，不必试错
-			const ladder = await ladderFor(ctx, route.provider, route.model, EFFORT_LADDER);
+			// 设置里测过就用它（零开销）；否则问这个模型支持哪些档（带缓存）；再不行退回梯子
+			const ladder = config.effort === 'auto'
+				? await ladderFor(ctx, route.provider, route.model, EFFORT_LADDER)
+				: [config.effort === 'none' ? undefined : config.effort];
 			const options = (effort) => ({
 				provider: route.provider,
 				model: route.model,
@@ -539,6 +545,7 @@ function apply(ctx, config) {
 				if (body[key] !== undefined) patch[key] = body[key];
 			}
 			if (body.generateMode === 'always' || body.generateMode === 'when-active') patch.generateMode = body.generateMode;
+			if (['auto', 'off', 'low', 'none'].includes(body.effort)) patch.effort = body.effort;
 			if (typeof body.debug === 'boolean') patch.debug = body.debug;
 			try {
 				const next = Object.keys(patch).length === 0 ? loadConfig(config) : saveConfig(config, patch);
@@ -546,6 +553,55 @@ function apply(ctx, config) {
 			} catch (error) {
 				return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
 			}
+		},
+	}));
+	// 思考档位测试：真发一个最小请求，依次试 off → low → 不传，第一个成功的即该模型可用档位
+	ctx.effect(() => ctx.connection.fetch.register({
+		path: EFFORT_TEST_ROUTE_PATH,
+		methods: ['POST'],
+		requestBody: 'buffered',
+		fetch: async (request) => {
+			let body;
+			try {
+				body = await request.json();
+			} catch {
+				body = undefined;
+			}
+			const cfg = loadConfig(config);
+			const provider = typeof body?.provider === 'string' && body.provider !== '' ? body.provider : cfg.provider;
+			const model = typeof body?.model === 'string' && body.model !== '' ? body.model : cfg.model;
+			if (!provider || !model) return Response.json({ ok: false, error: '先在设置里选好 provider 和模型' }, { status: 400 });
+			const tried = [];
+			let lastError;
+			for (const effort of ['off', 'low', undefined]) {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 20000);
+				try {
+					const stream = ctx.llm.stream({
+						provider, model,
+						messages: [createUserMessage({
+							content: [{ type: 'text', text: '回复：OK' }],
+							source: { kind: 'suggest-bar', plugin: name, form: 'effort-test' },
+						})],
+						maxTokens: 8,
+						...(effort !== undefined ? { reasoningEffort: effort } : {}),
+						purpose: PURPOSE,
+						signal: controller.signal,
+					});
+					const assembler = new BlockAssembler();
+					for await (const chunk of stream) assembler.push(chunk);
+					clearTimeout(timer);
+					dbg('effort test: 成功档位', effort ?? 'none');
+					return Response.json({ ok: true, effort: effort ?? 'none', tried: [...tried, effort ?? 'none'] });
+				} catch (error) {
+					clearTimeout(timer);
+					lastError = error;
+					tried.push(effort ?? 'none');
+					if (controller.signal.aborted) break;
+				}
+			}
+			dbg('effort test: 全部失败', tried);
+			return Response.json({ ok: false, error: lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown'), tried }, { status: 500 });
 		},
 	}));
 	// provider/模型目录路由（设置面板下拉用）：枚举 llm 服务的真实可用项
