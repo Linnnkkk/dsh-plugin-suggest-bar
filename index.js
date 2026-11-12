@@ -105,9 +105,12 @@ function dropSuggestion(sessionId) {
 }
 
 /** 直写 stdout（dsh.log）的调试探针——不依赖 ctx.logger（实测 warn 不落盘）。 */
-/** 调试探针：同时写 stdout 与插件目录 debug.log（DSH 的 stdout 走 supervisord pipe，读不到）。 */
+/** debug 开关的镜像，由 loadConfig 每次刷新——dbg 只在开启时落盘。 */
+let debugEnabled = false;
+/** 调试探针：stdout + 插件目录 debug.log（DSH 的 stdout 走 supervisord pipe，读不到）。 */
 const dbg = (...args) => {
 	console.log('[suggest-bar]', ...args);
+	if (!debugEnabled) return;
 	try {
 		if (statSync(DEBUG_PATH).size > DEBUG_MAX_BYTES) writeFileSync(DEBUG_PATH, '');
 	} catch { /* 文件还不存在 */ }
@@ -147,6 +150,7 @@ function loadConfig(seed) {
 			configCache = resolveConfig(JSON.parse(readFileSync(CONFIG_PATH, 'utf8')));
 			configMtime = st.mtimeMs;
 		}
+		debugEnabled = configCache.debug === true;
 		return configCache;
 	} catch {
 		const initial = resolveConfig(seed);
@@ -154,9 +158,11 @@ function loadConfig(seed) {
 			writeFileSync(CONFIG_PATH, `${JSON.stringify(initial, null, 2)}\n`, 'utf8');
 			configCache = initial;
 			configMtime = statSync(CONFIG_PATH).mtimeMs;
+			debugEnabled = initial.debug === true;
 			dbg('config: 首启落盘', CONFIG_PATH);
 		} catch (error) {
 			configCache = initial;
+			debugEnabled = initial.debug === true;
 			dbg('config: config.json 不可写，仅内存生效:', error instanceof Error ? error.message : String(error));
 		}
 		return configCache;
@@ -383,6 +389,7 @@ async function generate(ctx, seedConfig, session, turn) {
 
 function apply(ctx, config) {
 	const dbgOn = () => loadConfig(config).debug;
+	loadConfig(config); // 先读一次，让 debug 开关在第一条日志前生效
 	dbg('apply: mounted (config = 本插件目录 config.json，设置经 /api/suggest-bar/config 读写)');
 	loadStore();
 	ctx.on('session/event', (session, event) => {
@@ -451,7 +458,7 @@ function apply(ctx, config) {
 				lastPoll.set(sessionId, Date.now());
 				while (lastPoll.size > STORE_MAX) lastPoll.delete(lastPoll.keys().next().value);
 				const debt = deferred.get(sessionId);
-				if (debt !== undefined) {
+				if (debt !== undefined && !running.get(sessionId)) {
 					// 用户回到这个对话：把错过的那个回合补生成一次
 					deferred.delete(sessionId);
 					void generate(ctx, config, debt.session, debt.turn).catch(() => {});
