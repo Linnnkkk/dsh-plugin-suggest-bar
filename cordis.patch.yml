@@ -1,0 +1,21 @@
+# dsh-plugin-suggest-bar bundle patch
+# 宿主半边：回合结束后 fire-and-forget 辅助 LLM 调用（默认继承会话路由），
+# 结果存注册表（落盘 suggestions.json），经 /api/suggest-bar 供浏览器轮询。
+# 浏览器半边由 dsh.client 声明自动进 boot 图（conversation.input.dock 槽位）。
+- insert:
+    - id: suggest-bar
+      name: dsh-plugin-suggest-bar
+      config:
+        enabled: true
+        debug: false
+        # 留空则继承会话路由；也可在设置面板指定 provider/模型
+        provider: ""
+        model: ""
+        # 会话主模型属于这些 provider 时不生成（这些会话通常自带原生建议，避免双份）
+        skipProviders:
+          - claude-code
+        labelText: 建议
+        timeoutMs: 60000
+        maxOutputTokens: 256
+        maxSuggestionChars: 120
+        maxInputBytes: 10240

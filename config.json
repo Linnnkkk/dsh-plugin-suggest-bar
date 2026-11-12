@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "provider": "",
+  "model": "",
+  "skipProviders": [
+    "claude-code"
+  ],
+  "labelText": "建议",
+  "timeoutMs": 60000,
+  "maxOutputTokens": 256,
+  "maxSuggestionChars": 120,
+  "maxInputBytes": 10240,
+  "debug": false
+}
