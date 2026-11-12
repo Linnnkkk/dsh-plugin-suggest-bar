@@ -281,6 +281,43 @@ function cleanSuggestions(raw, maxChars) {
 	return out;
 }
 
+/**
+ * 某个 provider/model 该按什么顺序试思考档位。
+ * 优先问 DSH 这个模型支持哪些档（assets from least to greatest），直接取最省的一档，不必试错；
+ * 查不到能力信息就不传该字段；查询失败再退回 EFFORT_LADDER。
+ * 结果按 provider/model 缓存，避免每次生成都去查（可能是联网查询）。
+ */
+const EFFORT_CACHE_MAX = 64;
+const EFFORT_CACHE_TTL_MS = 10 * 60 * 1000;
+const effortCache = new Map(); // `${provider}/${model}` -> { at, ladder }
+async function ladderFor(ctx, provider, model, fallback) {
+	const key = `${provider}/${model}`;
+	const hit = effortCache.get(key);
+	if (hit !== undefined && Date.now() - hit.at < EFFORT_CACHE_TTL_MS) {
+		effortCache.delete(key);
+		effortCache.set(key, hit); // 保持 LRU 顺序
+		return hit.ladder;
+	}
+	let ladder;
+	try {
+		const info = await ctx.llm.resolveModelInfo(provider, model, AbortSignal.timeout(3000));
+		const efforts = info?.reasoning?.efforts;
+		if (Array.isArray(efforts) && efforts.length > 0) {
+			ladder = [efforts[0].id]; // 已按由省到费排序
+		} else {
+			ladder = [undefined]; // 该模型没有可选思考档：不传这个字段
+		}
+	} catch (error) {
+		dbg('effort: 能力查询失败，退回梯子:', error instanceof Error ? error.message : String(error));
+		return fallback; // 不缓存失败，下次再试
+	}
+	effortCache.delete(key);
+	effortCache.set(key, { at: Date.now(), ladder });
+	while (effortCache.size > EFFORT_CACHE_MAX) effortCache.delete(effortCache.keys().next().value);
+	return ladder;
+}
+
+
 async function generate(ctx, seedConfig, session, turn) {
 	const config = loadConfig(seedConfig);
 	const controller = new AbortController();
@@ -332,17 +369,15 @@ async function generate(ctx, seedConfig, session, turn) {
 			}
 			return assembler.blocks();
 		};
-		/**
-		 * 思考档位梯子 × 路由候选回退；超时是总预算；每档带计时。
-		 * off（最省）→ 不传该字段（模型用自家默认，给不支持 reasoningEffort 的模型兜底）→ low。
-		 * undefined 排在中间：不支持 effort 的模型一次就能落到兜底，不必先白试 low。
-		 */
-		const EFFORT_LADDER = ['off', undefined, 'low'];
+		/** 思考档位梯子（兜底用）：off 最省 → low → 不传（模型默认）。 */
+		const EFFORT_LADDER = ['off', 'low', undefined];
 		const startedAt = Date.now();
 		let blocks;
 		let attemptError;
 		outer:
 		for (const route of routeCandidates) {
+			// 先问这个模型支持哪些思考档（缓存），拿到就直接用最省那档，不必试错
+			const ladder = await ladderFor(ctx, route.provider, route.model, EFFORT_LADDER);
 			const options = (effort) => ({
 				provider: route.provider,
 				model: route.model,
@@ -355,7 +390,7 @@ async function generate(ctx, seedConfig, session, turn) {
 				...(effort !== undefined ? { reasoningEffort: effort } : {}),
 				signal: controller.signal,
 			});
-			for (const effort of EFFORT_LADDER) {
+			for (const effort of ladder) {
 				const t0 = Date.now();
 				try {
 					blocks = await drain(options(effort));
@@ -553,6 +588,7 @@ function apply(ctx, config) {
 		pending.clear();
 		deferred.clear();
 		lastPoll.clear();
+		effortCache.clear();
 		if (saveTimer !== undefined) flushStore(); // 卸载/重启前落盘未写的建议
 	});
 }
