@@ -44,6 +44,8 @@ const Config = z.object({
 	maxOutputTokens: z.natural().min(16).default(256),
 	maxSuggestionChars: z.natural().min(10).default(120),
 	maxInputBytes: z.natural().min(512).default(10240),
+	/** 生成时机：always=每回合都生成；when-active=只有该对话在前台时才生成（省 token）。 */
+	generateMode: z.string().default('always'),
 	debug: z.boolean().default(false),
 });
 
@@ -53,6 +55,15 @@ const running = new Map();  // sessionId -> boolean
 const pending = new Map();  // sessionId -> AbortController
 const lastTurn = new Map(); // sessionId -> { user: string, assistant: string }
 const warned = new Set();
+/** when-active 模式：前端最近一次轮询时间（有轮询=有人正在看这个对话）。 */
+const lastPoll = new Map();   // sessionId -> timestamp
+/** when-active 模式下"没人在看"错过的回合，等用户回到对话时补生成一次。 */
+const deferred = new Map();   // sessionId -> { session, turn }
+const ACTIVE_WINDOW_MS = 15000; // 15s 内有轮询就算在看（轮询间隔 700ms，留足容错）
+const isActive = (sessionId) => {
+	const at = lastPoll.get(sessionId);
+	return at !== undefined && Date.now() - at < ACTIVE_WINDOW_MS;
+};
 
 /** 建议持久化：独立 suggestions.json（不写会话日志），host 重启后恢复；写盘 500ms 防抖。 */
 function loadStore() {
@@ -105,6 +116,7 @@ function resolveConfig(c) {
 		maxOutputTokens: numOr(c?.maxOutputTokens, 256, 16),
 		maxSuggestionChars: numOr(c?.maxSuggestionChars, 120, 10),
 		maxInputBytes: numOr(c?.maxInputBytes, 10240, 512),
+		generateMode: c?.generateMode === 'when-active' ? 'when-active' : 'always',
 		debug: c?.debug === true,
 	};
 }
@@ -367,6 +379,7 @@ function apply(ctx, config) {
 			if (event.type === 'turn/start') {
 				running.set(session.id, true);
 				pending.get(session.id)?.abort();
+				deferred.delete(session.id); // 用户已发话：欠账作废
 				dropSuggestion(session.id); // 用户已发话：旧建议立刻作废
 				return;
 			}
@@ -374,6 +387,16 @@ function apply(ctx, config) {
 				running.set(session.id, false);
 				if (dbgOn()) dbg('event: turn/end', { turn: data.turn, reason: data.reason?.kind });
 				if (data.reason?.kind === 'completed' && typeof data.turn === 'number') {
+					if (dbgOn() && loadConfig(config).generateMode === 'when-active') {
+						dbg('event: turn/end 模式判定', { turn: data.turn, active: isActive(session.id) });
+					}
+					if (loadConfig(config).generateMode === 'when-active' && !isActive(session.id)) {
+						// 没人在看：记一笔欠账，等前端回到这个对话时再生成
+						deferred.delete(session.id);
+						deferred.set(session.id, { session, turn: data.turn });
+						while (deferred.size > STORE_MAX) deferred.delete(deferred.keys().next().value);
+						return;
+					}
 					void generate(ctx, config, session, data.turn).catch(() => {});
 				}
 			}
@@ -396,6 +419,18 @@ function apply(ctx, config) {
 			const sessionId = body && typeof body === 'object' && typeof body.sessionId === 'string' && body.sessionId !== ''
 				? body.sessionId
 				: undefined;
+			if (sessionId !== undefined) {
+				// 有轮询 = 有人正在看这个对话（when-active 模式的判定依据）
+				lastPoll.delete(sessionId);
+				lastPoll.set(sessionId, Date.now());
+				while (lastPoll.size > STORE_MAX) lastPoll.delete(lastPoll.keys().next().value);
+				const debt = deferred.get(sessionId);
+				if (debt !== undefined) {
+					// 用户回到这个对话：把错过的那个回合补生成一次
+					deferred.delete(sessionId);
+					void generate(ctx, config, debt.session, debt.turn).catch(() => {});
+				}
+			}
 			let suggestion = null;
 			if (sessionId !== undefined && !running.get(sessionId)) {
 				const s = store.get(sessionId);
@@ -428,6 +463,7 @@ function apply(ctx, config) {
 			for (const key of ['timeoutMs', 'maxOutputTokens', 'maxSuggestionChars', 'maxInputBytes']) {
 				if (body[key] !== undefined) patch[key] = body[key];
 			}
+			if (body.generateMode === 'always' || body.generateMode === 'when-active') patch.generateMode = body.generateMode;
 			if (typeof body.debug === 'boolean') patch.debug = body.debug;
 			try {
 				const next = Object.keys(patch).length === 0 ? loadConfig(config) : saveConfig(config, patch);
@@ -475,6 +511,8 @@ function apply(ctx, config) {
 	ctx.effect(() => () => {
 		for (const controller of pending.values()) controller.abort();
 		pending.clear();
+		deferred.clear();
+		lastPoll.clear();
 		if (saveTimer !== undefined) flushStore(); // 卸载/重启前落盘未写的建议
 	});
 }

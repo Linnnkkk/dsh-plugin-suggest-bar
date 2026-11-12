@@ -471,6 +471,17 @@ window.__ModuleLoader__.load({
 			return el("div", { className: "dsh-sb-card" },
 				el("div", { className: "dsh-sb-desc" }, "回合结束后，输入框上方预测你的下一句（异步小调用；点“采用”填入输入框，“发送”直接发出）。改动下一回合生效。"),
 				el(CheckField, { label: "启用", field: "enabled", cfg, update }),
+				el(SelectField, {
+					label: "生成时机",
+					hint: "「每次都生成」不看也备好；「仅对话在前台时」切走就不生成，回来自动补一次",
+					value: cfg.generateMode ?? "always",
+					placeholder: "每次都生成",
+					options: [
+						{ value: "always", label: "每次都生成" },
+						{ value: "when-active", label: "仅对话在前台时" },
+					],
+					onChange: (v) => update({ generateMode: v }),
+				}),
 				el(TextField, { label: "标签文案", hint: "建议栏左侧标签", field: "labelText", cfg, update }),
 				el(PickField, {
 					label: "生成 provider",
