@@ -51,6 +51,8 @@ const Config = z.object({
 	generateMode: z.string().default('always'),
 	/** 思考档位：auto=自动探测；off / low=固定；none=不传该字段。设置面板「测试」会自动写入。 */
 	effort: z.string().default('auto'),
+	/** 助手回复里以这些前缀开头的行在拼输入前丢掉（如记忆引用标记）；默认空=不丢任何行。 */
+	stripLinePrefixes: z.array(z.string()).default([]),
 	debug: z.boolean().default(false),
 });
 
@@ -140,6 +142,9 @@ function resolveConfig(c) {
 		maxInputBytes: numOr(c?.maxInputBytes, 10240, 512),
 		generateMode: c?.generateMode === 'when-active' ? 'when-active' : 'always',
 		effort: ['off', 'low', 'none'].includes(c?.effort) ? c.effort : 'auto',
+		stripLinePrefixes: Array.isArray(c?.stripLinePrefixes)
+			? c.stripLinePrefixes.filter((x) => typeof x === 'string' && x !== '')
+			: [],
 		debug: c?.debug === true,
 	};
 }
@@ -221,10 +226,15 @@ function systemPrompt() {
 	].join('\n');
 }
 
-/** 助手回复去噪：记忆引用行（📎）、代码块、表格对“猜下一句”没用，还会把结尾的提问挤出预算。 */
-function cleanAssistant(a) {
+/** 助手回复去噪：引用标记行（由配置指定）、代码块、表格对“猜下一句”没用，还会把结尾的提问挤出预算。 */
+function cleanAssistant(a, stripPrefixes) {
 	let s = a.replace(/```[\s\S]*?```/g, '[代码块]');
-	s = s.split('\n').filter((l) => !l.trim().startsWith('📎')).join('\n');
+	if (stripPrefixes.length > 0) {
+		s = s.split('\n').filter((l) => {
+			const t = l.trim();
+			return !stripPrefixes.some((p) => t.startsWith(p));
+		}).join('\n');
+	}
 	s = s.replace(/(^\|.*\|[ \t]*(\n|$))+/gm, '[表格]\n');
 	return s.replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -243,10 +253,10 @@ function tailBytes(s, n) {
 }
 
 /** 组装输入：之前几条用户消息 + 本轮用户 + 去噪后的助手回复（头尾）；超预算先丢历史，再从前面截。 */
-function frame(t, maxBytes) {
+function frame(t, maxBytes, stripPrefixes = []) {
 	const current = [
 		`[用户本轮]\n${headTail(t.user, 300, 300)}`,
-		`[助手本轮回复（结尾最重要）]\n${headTail(cleanAssistant(t.assistant ?? ''), 500, 1800)}`,
+		`[助手本轮回复（结尾最重要）]\n${headTail(cleanAssistant(t.assistant ?? '', stripPrefixes), 500, 1800)}`,
 	];
 	const history = (t.history ?? []).length > 0
 		? [`[用户之前几条消息（学口吻，也看他习惯怎么下指令）]\n${t.history.map((h) => `- ${h.slice(0, 150).replace(/\n/g, ' ')}`).join('\n')}`]
@@ -355,7 +365,7 @@ async function generate(ctx, seedConfig, session, turn) {
 		}
 		if (config.debug) dbg('generate: route candidates', routeCandidates);
 		const messages = [createUserMessage({
-			content: [{ type: 'text', text: frame(t, config.maxInputBytes) }],
+			content: [{ type: 'text', text: frame(t, config.maxInputBytes, config.stripLinePrefixes) }],
 			source: { kind: 'suggest-bar', plugin: name, form: 'transcript' },
 		})];
 		const drain = async (opts) => {
@@ -591,6 +601,11 @@ function apply(ctx, config) {
 					const assembler = new BlockAssembler();
 					for await (const chunk of stream) assembler.push(chunk);
 					clearTimeout(timer);
+					const finish = assembler.finish;
+					if (finish.kind !== 'stop' && finish.kind !== 'max-tokens' && finish.kind !== 'tool-calls') {
+						const failure = finish.failure ?? {};
+						throw new Error(`generation finished with "${finish.kind}": ${String(failure.code ?? '')} ${String(failure.message ?? '')}`.trim());
+					}
 					dbg('effort test: 成功档位', effort ?? 'none');
 					return Response.json({ ok: true, effort: effort ?? 'none', tried: [...tried, effort ?? 'none'] });
 				} catch (error) {
