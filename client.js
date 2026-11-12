@@ -527,7 +527,7 @@ window.__ModuleLoader__.load({
 				}),
 				el(PickField, {
 					label: "生成模型",
-					hint: cfg.provider === "" ? "先选 provider" : "建议选快模型（如 deepseek-flash / haiku）",
+					hint: cfg.provider === "" ? "先选 provider" : "建议选便宜的快模型",
 					value: cfg.model, placeholder: "跟随会话路由",
 					options: modelOptions, onChange: (v) => update({ model: v }),
 				}),
