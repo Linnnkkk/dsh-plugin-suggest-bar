@@ -332,8 +332,12 @@ async function generate(ctx, seedConfig, session, turn) {
 			}
 			return assembler.blocks();
 		};
-		/** 思考档位梯子（off→low→默认，由省到费）× 路由候选回退；超时是总预算；每档带计时。 */
-		const EFFORT_LADDER = ['off', 'low', undefined];
+		/**
+		 * 思考档位梯子 × 路由候选回退；超时是总预算；每档带计时。
+		 * off（最省）→ 不传该字段（模型用自家默认，给不支持 reasoningEffort 的模型兜底）→ low。
+		 * undefined 排在中间：不支持 effort 的模型一次就能落到兜底，不必先白试 low。
+		 */
+		const EFFORT_LADDER = ['off', undefined, 'low'];
 		const startedAt = Date.now();
 		let blocks;
 		let attemptError;
