@@ -2,3 +2,5 @@
 suggestions.json
 # 本机调试日志
 *.log
+# 本机运行配置（首启由 cordis.patch.yml 种子生成），不入库
+config.json
