@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-suggest-bar",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "MIT",
   "description": "Input-box-top next-prompt suggestion bar for dsh web: async side-call after each completed turn (reply-first, async-suggestion two-phase UX), tap-friendly adopt/send/dismiss buttons",
   "type": "module",
