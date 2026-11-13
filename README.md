@@ -20,12 +20,12 @@ dsh 插件列表里还有两个做同一件事的插件。下表按**各自仓�
 | 思考档位 | 可选，且能「测试」探测支持哪档 | 写死 `off` | 无 |
 | 与原生建议撞车 | `skipProviders` 可跳过 | 无 | 无 |
 | 代码量 | 61.7 KB / 1283 行 | 108.6 KB / 2665 行 | **25.5 KB / 548 行** |
-| 测试 | host 侧 21 条用例；client 侧暂无 | 5 个测试文件（含 client） | 2 个测试文件（含 client） |
+| 测试 | host 行为 21 条 + client 接线契约 9 条；渲染/交互未覆盖 | 5 个测试文件（含 client） | 2 个测试文件（含 client） |
 | 分发 | GitHub 源码 | GitHub Release tarball + npm | GitHub 源码 |
 
 ### 我们不如它们的地方
 
-- **client 侧还没测试。** host 侧有 21 条用例，浏览器侧（卡片渲染、打字折叠、轮播）目前只靠手测。
+- **client 侧只测了接线契约。** 卡片渲染、打字折叠、1/3 轮播、点击这些行为仍靠手测——那层要真 React + DOM，本次刻意没引入。
 - **比 tab-complete 重 2.4 倍。** 如果只要「灰字补全 + Tab 填入」这一个功能，那个更合适。
 - **「发送」是取舍，不是纯优点。** 两个竞品都刻意不代发（prompt-for-me 明写 never sends a message automatically）。我们少一步确认，也少一道保险。
 - **交互细节没 prompt-for-me 细。** 它有 Esc 关闭、清空草稿自动复现、把跳过的候选回喂给模型避免重复；这些我们没做。
@@ -92,7 +92,12 @@ npm install   # 只装 devDependencies（@deepseek-ai/dsh-llm / schemastery）�
 npm test
 ```
 
-host 侧 21 条，走的是「假装一个 ctx → 发会话事件 → 读路由返回什么」这条路，断言的都是外部能观察到的结果（路由返回、`llm.stream` 有没有被调用、落盘文件内容），不贴内部实现。
+分两层，都不需要额外依赖：
+
+- **host 侧 21 条**：假装一个 ctx → 发会话事件 → 读路由返回什么。断言的都是外部能观察到的结果（路由返回、`llm.stream` 有没有被调用、落盘文件内容），不贴内部实现。
+- **client 侧 9 条**：用假 `react` 把 `client.js` 求值出来，验证与宿主客户端的接线契约——`__ModuleLoader__` 形态、导出的 `apply`/`inject`、注册了哪两个槽位及其 `id`/`order`、没有 `sessionId` 时不渲染。**这一层不渲染组件**，所以测不到渲染和交互。
+
+假 `react` 的 hooks 被设计成「一旦被调用就抛错」，防止组件体在求值阶段被意外执行时测试还静悄悄通过。
 
 数据目录默认就是插件目录；测试会把 `SUGGEST_BAR_DATA_DIR` 指到临时目录，所以不会读到也不会写坏真实的 `config.json` / `suggestions.json`。
 
@@ -104,7 +109,7 @@ client 侧（浏览器）还没有测试，目前靠手测。
 
 ## 版本
 
-- v0.4.2 补 host 侧测试（21 条，`npm test`）；数据目录支持 `SUGGEST_BAR_DATA_DIR` 覆盖，测试不再碰真实 config.json / suggestions.json
+- v0.4.2 补测试：host 行为 21 条 + client 接线契约 9 条（`npm test`，零额外依赖）；数据目录支持 `SUGGEST_BAR_DATA_DIR` 覆盖，测试不再碰真实 config.json / suggestions.json
 - v0.4.1 修 `@deepseek-ai/dsh-llm` 的 peer 范围：原 `>=0.2.0-rc.2` 按 semver 预发布规则只匹配 0.2.0-rc.2，装到 0.2.1/0.2.2 的预发布宿主上会被解析成旧版本；改为显式 `||` 分支覆盖 0.2.x
 - v0.4.0 自管 config.json + settings.section 设置面板 + provider/模型下拉识别；标签默认「建议」（动态下发，零硬编码）
 - v0.3.0 dock 槽流式布局 + 主题自适应卡片（主题变量/底角方半径/折叠动画）
