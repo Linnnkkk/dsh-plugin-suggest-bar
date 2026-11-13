@@ -2,8 +2,9 @@
 suggestions.json
 # 命中率统计：含用户消息片段，禁止入库
 feedback.jsonl
-# 本机调试日志
+# 本机调试日志（含轮转出来的 debug.log.1）
 *.log
+*.log.1
 # 本机运行配置（首启由 cordis.patch.yml 种子生成），不入库
 config.json
 

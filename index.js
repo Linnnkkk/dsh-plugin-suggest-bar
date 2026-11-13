@@ -16,7 +16,7 @@
  *
  * 刻意的取舍：不写自定义会话事件（宿主事件校验会拒载整本日志）；建议持久化到独立 suggestions.json 而非会话日志。
  */
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import z from '@deepseek-ai/schemastery';
@@ -35,6 +35,7 @@ const DATA_DIR = process.env.SUGGEST_BAR_DATA_DIR ?? fileURLToPath(new URL('.', 
 const CONFIG_PATH = join(DATA_DIR, 'config.json');
 const STORE_PATH = join(DATA_DIR, 'suggestions.json');
 const DEBUG_PATH = join(DATA_DIR, 'debug.log');
+const DEBUG_PREV_PATH = join(DATA_DIR, 'debug.log.1');
 const FEEDBACK_PATH = join(DATA_DIR, 'feedback.jsonl');
 const FEEDBACK_MAX_LINES = 500; // 只留最近 N 次评估，够看趋势又不至于无限长
 const DEBUG_MAX_BYTES = 2 * 1024 * 1024; // 超过就重开，避免无界增长
@@ -205,10 +206,15 @@ function feedbackStats(limit = FEEDBACK_MAX_LINES) {
 let debugEnabled = false;
 /** 调试探针：stdout + 插件目录 debug.log（DSH 的 stdout 走 supervisord pipe，读不到）。 */
 const dbg = (...args) => {
+	if (!debugEnabled) return; // 关掉就彻底安静：stdout 和文件都不写
 	console.log('[suggest-bar]', ...args);
-	if (!debugEnabled) return;
 	try {
-		if (statSync(DEBUG_PATH).size > DEBUG_MAX_BYTES) writeFileSync(DEBUG_PATH, '');
+		if (statSync(DEBUG_PATH).size > DEBUG_MAX_BYTES) {
+			// 真轮转：当前 → debug.log.1（覆盖上一份），再新建一份空的。
+			// 以前是直接清空，历史会无声消失。
+			try { renameSync(DEBUG_PATH, DEBUG_PREV_PATH); } catch { /* 目标被占用等情况：退化为清空 */ }
+			writeFileSync(DEBUG_PATH, '', 'utf8');
+		}
 	} catch { /* 文件还不存在 */ }
 	try {
 		appendFileSync(DEBUG_PATH, `[${new Date().toISOString()}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}\n`, 'utf8');
