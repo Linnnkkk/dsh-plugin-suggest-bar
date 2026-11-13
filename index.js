@@ -461,8 +461,18 @@ async function generate(ctx, seedConfig, session, turn) {
 			return;
 		}
 		if (config.debug) dbg('generate: route candidates', routeCandidates);
+		const step = lastStep.get(session.id);
+		const frameText = frame(t, config.maxInputBytes, config.stripLinePrefixes, step);
+		if (config.debug) {
+			// 只记"输入由哪几段组成"和工具名/成败，不记正文——够定位问题，又不把对话写进日志
+			dbg('generate: input', {
+				bytes: Buffer.byteLength(frameText, 'utf8'),
+				sections: frameText.split('\n').filter((l) => l.startsWith('[')).map((l) => l.slice(0, 24)),
+				step: step === undefined ? null : { name: step.name, ok: step.ok },
+			});
+		}
 		const messages = [createUserMessage({
-			content: [{ type: 'text', text: frame(t, config.maxInputBytes, config.stripLinePrefixes, lastStep.get(session.id)) }],
+			content: [{ type: 'text', text: frameText }],
 			source: { kind: 'suggest-bar', plugin: name, form: 'transcript' },
 		})];
 		const drain = async (opts) => {
