@@ -71,7 +71,7 @@ const pending = new Map();  // sessionId -> AbortController
 const lastTurn = new Map(); // sessionId -> { user: string, assistant: string }
 /** 本轮最后一次工具调用的成败：给模型看"实际发生了什么"，而不只是助手自己怎么说。 */
 const lastStep = new Map(); // sessionId -> { name: string, ok: boolean|undefined }
-const callNames = new Map(); // callId -> tool name（tool/result 只带 toolCallId，靠它回查）
+const callNames = new Map(); // callId -> { sessionId, name }（tool/result 只带 toolCallId，靠它回查；带 sessionId 才能只清本会话）
 const generatedTurn = new Map(); // sessionId -> turn（同一回合只生成一次，防重复调用）
 /** 待评估的建议副本：turn/start 会作废 store 里的显示副本，但评估要用到它。 */
 const pendingEval = new Map(); // sessionId -> { turn, texts }
@@ -592,7 +592,7 @@ function apply(ctx, config) {
 				if (toolName !== '') {
 					lastStep.set(session.id, { name: toolName, ok: undefined });
 					if (typeof data.callId === 'string') {
-						callNames.set(data.callId, toolName);
+						callNames.set(data.callId, { sessionId: session.id, name: toolName });
 						while (callNames.size > 200) callNames.delete(callNames.keys().next().value);
 					}
 				}
@@ -601,7 +601,8 @@ function apply(ctx, config) {
 			if (event.type === 'tool/result') {
 				const failed = data.message?.isError === true;
 				const callId = data.message?.toolCallId;
-				const known = typeof callId === 'string' ? callNames.get(callId) : undefined;
+				const knownEntry = typeof callId === 'string' ? callNames.get(callId) : undefined;
+				const known = knownEntry === undefined ? undefined : knownEntry.name;
 				if (typeof callId === 'string') callNames.delete(callId);
 				const step = lastStep.get(session.id);
 				const toolName = known ?? step?.name;
@@ -616,7 +617,8 @@ function apply(ctx, config) {
 				deferred.delete(session.id); // 用户已发话：欠账作废
 				dropSuggestion(session.id); // 用户已发话：旧建议立刻作废（待评估副本保留）
 				lastStep.delete(session.id); // 新一轮，上一步的结论作废
-				callNames.clear();
+				// 只清本会话的在途调用：并发会话（如子任务）不该被别人的 turn/start 牵连
+				for (const [cid, entry] of callNames) { if (entry.sessionId === session.id) callNames.delete(cid); }
 				return;
 			}
 			if (event.type === 'turn/end') {

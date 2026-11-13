@@ -609,3 +609,30 @@ test('统计在多次回合上累计', async () => {
 	assert.equal(stats.miss, 1);
 	assert.equal(stats.exactRate, 50);
 });
+
+// ---------- N. 并发会话隔离 ----------
+
+test('另一个会话开始新一轮，不会清掉本会话在途的工具名', async () => {
+	const h = await freshHarness();
+	const a = nextSession(ROUTE_A);
+	const b = nextSession(ROUTE_A);
+
+	// A 一轮里并行调了两个工具，结果会乱序回来
+	h.emit(a, turnStart());
+	h.emit(a, userMsg('查一下再跑一下'));
+	h.emit(a, assistantMsg('我并行做两件事。'));
+	h.emit(a, { type: 'tool/call', data: { name: 'Read', callId: 'a1', step: 1, turn: 1 } });
+	h.emit(a, { type: 'tool/call', data: { name: 'Bash', callId: 'a2', step: 1, turn: 1 } });
+
+	// B 此时开始新一轮（以前这会把 A 的在途映射一起清掉）
+	h.emit(b, turnStart());
+
+	// A 的第一个调用（Read）先回来，且失败
+	h.emit(a, { type: 'tool/result', data: { message: { isError: true, toolCallId: 'a1' }, step: 1, turn: 1 } });
+	h.emit(a, turnEnd(1));
+
+	const sent = requestText((await waitForSuggestion(h, a.id), h.streamCalls[h.streamCalls.length - 1]));
+	assert.match(sent, /Read/, '应当是 Read 的结果，而不是被后一个工具名覆盖');
+	assert.doesNotMatch(sent, /最后一步\] Bash/, '不该错误地标成 Bash');
+	assert.match(sent, /失败/);
+});
