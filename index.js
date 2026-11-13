@@ -54,6 +54,8 @@ const Config = z.object({
 	timeoutMs: z.natural().min(1000).default(60000),
 	maxOutputTokens: z.natural().min(16).default(256),
 	maxSuggestionChars: z.natural().min(10).default(120),
+	/** 一次最多给几条候选。是上限不是配额：凑不出这么多不同方向就少给。 */
+	maxSuggestions: z.natural().min(1).max(6).default(3),
 	maxInputBytes: z.natural().min(512).default(10240),
 	/** 生成时机：always=每回合都生成；when-active=只有该对话在前台时才生成（省 token）。 */
 	generateMode: z.string().default('always'),
@@ -222,6 +224,13 @@ const dbg = (...args) => {
 };
 
 /** 任意来源（yml / config.json / 路由 patch）→ 规整后的有效配置。 */
+/** 数字钳制：非数字回退默认值，数字则钳到 [lo, hi]。 */
+function clampInt(v, fallback, lo, hi) {
+	const n = Number(v);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.min(hi, Math.max(lo, Math.floor(n)));
+}
+
 function resolveConfig(c) {
 	const numOr = (v, d, min) => {
 		const n = Number(v);
@@ -236,6 +245,8 @@ function resolveConfig(c) {
 		timeoutMs: numOr(c?.timeoutMs, 60000, 1000),
 		maxOutputTokens: numOr(c?.maxOutputTokens, 512, 16),
 		maxSuggestionChars: numOr(c?.maxSuggestionChars, 120, 10),
+		// 超出范围直接钳到 1..6（而不是回退默认），这样用户填 0 或 99 都能看到边界值
+		maxSuggestions: clampInt(c?.maxSuggestions, 3, 1, 6),
 		maxInputBytes: numOr(c?.maxInputBytes, 10240, 512),
 		generateMode: c?.generateMode === 'when-active' ? 'when-active' : 'always',
 		effort: ['off', 'low', 'none'].includes(c?.effort) ? c.effort : 'auto',
@@ -310,7 +321,7 @@ function noteTurn(sessionId, key, text) {
  * v2 提示词（2026-11-12 在 72 条真实会话样本上评测选出）：
  * 现行版爱出“好”“谢谢整理”这类空话；只加细节的版本又太长、爱把几件事串起来、编造细节。
  */
-function systemPrompt() {
+function systemPrompt(count) {
 	return [
 		'你替用户预写他下一条要发的消息——本质是给助手下的一条指令，不是对上一句的回应。',
 		'每条都必须让助手去做一件具体的事：改哪个、查什么、跑什么、接着做哪一步、或解释什么。没有动作对象的话不要说（纯态度、纯评价、纯确认都不算）。',
@@ -318,7 +329,7 @@ function systemPrompt() {
 		'只说用户真会发的：指令、纠正、要求下一步、追问、解释/诊断；状态汇报、观察、猜测、评价不写。',
 		'口吻照抄他最近几条：口语、直接、短，十个字能说完不用二十个。',
 		'助手让他选 → 写那个选项；助手做完 → 下一步做什么；助手卡住/有遗留 → 让它接着处理那件事。不替助手说话，不用「另外」「顺便」串多句。',
-		'输出 3 行，每行一条，各覆盖一个方向（同意/纠正/追问/换思路），可能性从高到低；只有一个成立才少给，不要换说法凑数；无序号、引号、Markdown、解释。',
+		`最多输出 ${count} 行，每行一条，各覆盖一个不同方向（同意/纠正/追问/换思路/补充约束等），可能性从高到低；凑不出这么多不同方向就少给，不要换说法凑数；无序号、引号、Markdown、解释。`,
 		'都没把握就只输出 NONE。',
 	].join('\n');
 }
@@ -371,7 +382,7 @@ function frame(t, maxBytes, stripPrefixes = [], step) {
 
 /** 清洗为“一句用户口吻的话”；非空即可（“好”“嗯”这类一字真言是合法预测）。 */
 /** 按行解析模型输出：一行一条，最多 3 条；NONE / 助手腔 / markdown 行一律丢弃。 */
-function cleanSuggestions(raw, maxChars) {
+function cleanSuggestions(raw, maxChars, maxCount) {
 	const out = [];
 	const lines = String(raw ?? '').replace(/```[\s\S]*?```/g, '\n').split(/\r?\n/);
 	for (const line of lines) {
@@ -393,7 +404,7 @@ function cleanSuggestions(raw, maxChars) {
 		if (/^(用户|我方|下一句|建议|让我|我来|下面|以下|根据上述|总结)[:：]?/.test(t) && t.length > 12) continue;
 		if (t.length > maxChars) t = t.slice(0, maxChars);
 		out.push(t);
-		if (out.length >= 3) break;
+		if (out.length >= maxCount) break;
 	}
 	return out;
 }
@@ -511,9 +522,13 @@ async function generate(ctx, seedConfig, session, turn) {
 				provider: route.provider,
 				model: route.model,
 				messages,
-				system: systemPrompt(),
+				system: systemPrompt(config.maxSuggestions),
 				// 关思考时一句话 256 足够；只能带思考的模型需给推理留余量，否则必撞 max-tokens
-				maxTokens: effort === 'off' ? config.maxOutputTokens : Math.max(config.maxOutputTokens, 1024),
+				// 上限必须放得下 N 条：否则条数一调大，最后一条会被静默截掉
+				maxTokens: Math.max(
+					effort === 'off' ? config.maxOutputTokens : Math.max(config.maxOutputTokens, 1024),
+					Math.ceil(config.maxSuggestions * config.maxSuggestionChars * 1.2),
+				),
 				sessionId: session.id,
 				purpose: PURPOSE,
 				...(effort !== undefined ? { reasoningEffort: effort } : {}),
@@ -541,7 +556,7 @@ async function generate(ctx, seedConfig, session, turn) {
 		if (blocks === undefined && attemptError !== undefined) throw attemptError;
 		// 多行解析：必须按换行保留边界，不能用空格拼接
 		const raw = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n');
-		const texts = cleanSuggestions(raw, config.maxSuggestionChars);
+		const texts = cleanSuggestions(raw, config.maxSuggestionChars, config.maxSuggestions);
 		if (config.debug) dbg('generate: result', { rawLen: raw.length, count: texts.length, texts: texts.map((t) => t.slice(0, 40)) });
 		if (texts.length > 0) setSuggestion(session.id, { turn, texts });
 		else { dropSuggestion(session.id); pendingEval.delete(session.id); }
@@ -705,7 +720,7 @@ function apply(ctx, config) {
 			if (typeof body.labelText === 'string') patch.labelText = body.labelText;
 			if (Array.isArray(body.skipProviders)) patch.skipProviders = body.skipProviders;
 			if (Array.isArray(body.stripLinePrefixes)) patch.stripLinePrefixes = body.stripLinePrefixes.filter((x) => typeof x === 'string' && x !== '');
-			for (const key of ['timeoutMs', 'maxOutputTokens', 'maxSuggestionChars', 'maxInputBytes']) {
+			for (const key of ['timeoutMs', 'maxOutputTokens', 'maxSuggestionChars', 'maxSuggestions', 'maxInputBytes']) {
 				if (body[key] !== undefined) patch[key] = body[key];
 			}
 			if (body.generateMode === 'always' || body.generateMode === 'when-active') patch.generateMode = body.generateMode;

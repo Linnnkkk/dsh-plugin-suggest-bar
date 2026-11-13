@@ -176,7 +176,7 @@ test('回合正常结束：生成建议并可从路由读到', async () => {
 	assert.equal(h.streamCalls[0].model, 'm');
 });
 
-test('模型给很多行时，最多保留 3 条', async () => {
+test('模型给很多行时，默认最多保留 3 条', async () => {
 	const h = await freshHarness({ reply: '一\n二\n三\n四\n五' });
 	const session = nextSession(ROUTE_A);
 	playTurn(h, session);
@@ -635,4 +635,55 @@ test('另一个会话开始新一轮，不会清掉本会话在途的工具名',
 	assert.match(sent, /Read/, '应当是 Read 的结果，而不是被后一个工具名覆盖');
 	assert.doesNotMatch(sent, /最后一步\] Bash/, '不该错误地标成 Bash');
 	assert.match(sent, /失败/);
+});
+
+// ---------- O. 候选条数可配置 ----------
+
+test('把最多几条建议调到 5，就收 5 条', async () => {
+	const h = await freshHarness({ reply: '一\n二\n三\n四\n五\n六\n七' });
+	await h.writeConfig({ maxSuggestions: 5 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+
+	const suggestion = await waitForSuggestion(h, session.id);
+	assert.deepEqual(suggestion.texts, ['一', '二', '三', '四', '五']);
+});
+
+test('调到 2 条就只收 2 条', async () => {
+	const h = await freshHarness({ reply: '一\n二\n三' });
+	await h.writeConfig({ maxSuggestions: 2 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+
+	const suggestion = await waitForSuggestion(h, session.id);
+	assert.deepEqual(suggestion.texts, ['一', '二']);
+});
+
+test('条数会写进提示词，模型才知道要给几条', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 4 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	assert.match(h.streamCalls[0].system, /最多输出 4 行/, '提示词里应当带上配置的条数');
+});
+
+test('条数调大时，输出上限自动抬到放得下（防止最后一条被截断）', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 5, maxSuggestionChars: 120 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	// 5 × 120 × 1.2 = 720，高于配置里的 512
+	assert.equal(h.streamCalls[0].maxTokens, 720);
+});
+
+test('条数超出范围会被钳到 1..6', async () => {
+	const h = await freshHarness();
+	const big = await h.writeConfig({ maxSuggestions: 99 });
+	assert.equal(big.config.maxSuggestions, 6);
+	const zero = await h.writeConfig({ maxSuggestions: 0 });
+	assert.equal(zero.config.maxSuggestions, 1);
 });

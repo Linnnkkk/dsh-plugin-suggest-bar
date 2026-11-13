@@ -645,6 +645,7 @@ window.__ModuleLoader__.load({
 				el(NumberField, { label: "总超时(ms)", field: "timeoutMs", cfg, update, min: 1000 }),
 				el(NumberField, { label: "输出 token 上限", field: "maxOutputTokens", cfg, update, min: 16 }),
 				el(NumberField, { label: "建议最大字符数", field: "maxSuggestionChars", cfg, update, min: 10 }),
+				el(NumberField, { label: "最多几条建议", hint: "上限不是配额：凑不出这么多不同方向时会少给。调大可能让后面的条目变成换说法凑数", field: "maxSuggestions", cfg, update, min: 1 }),
 				el("div", { className: "dsh-sb-row" },
 					el("label", null, "命中率"),
 					el("span", { className: "dsh-sb-hint" }, statsText(stats)),

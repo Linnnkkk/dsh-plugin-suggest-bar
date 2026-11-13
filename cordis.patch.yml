@@ -16,6 +16,8 @@
           - claude-code
         labelText: 建议
         timeoutMs: 60000
-        maxOutputTokens: 256
+        maxOutputTokens: 512
         maxSuggestionChars: 120
+        # 一次最多给几条候选（上限，不是配额；凑不出不同方向就少给）
+        maxSuggestions: 3
         maxInputBytes: 10240
