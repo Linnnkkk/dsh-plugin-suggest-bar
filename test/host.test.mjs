@@ -687,3 +687,68 @@ test('条数超出范围会被钳到 1..6', async () => {
 	const zero = await h.writeConfig({ maxSuggestions: 0 });
 	assert.equal(zero.config.maxSuggestions, 1);
 });
+
+// ---------- P. 占位符去噪 ----------
+
+test('代码块占位符不再进输入，但正文一字不丢', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('改一下'));
+	// 真实形态：占位符后面紧跟正文（同一行），且正文里带收尾提问
+	h.emit(session, assistantMsg(
+		'第一段正文。\n```sh\necho a\n```第二段正文。\n```sh\necho b\n```第三段正文，要我提交吗？',
+	));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.equal((sent.match(/\[代码块\]/g) || []).length, 0, '占位符不该占预算');
+	assert.match(sent, /第一段正文/);
+	assert.match(sent, /第二段正文/);
+	assert.match(sent, /第三段正文，要我提交吗/, '和占位符同行的正文必须保留');
+});
+
+test('助手回复只有代码块时，仍保留一个占位符（不变成空）', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('看看这个'));
+	h.emit(session, assistantMsg('```sh\nls\n```'));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.equal((sent.match(/\[代码块\]/g) || []).length, 1, '整段只有代码块时留一个标记');
+});
+
+test('几十个代码块不再把输入预算吃光', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('改一下'));
+	const many = Array.from({ length: 30 }, (_, i) => `第${i}段正文。\n\`\`\`sh\necho ${i}\n\`\`\``).join('\n');
+	h.emit(session, assistantMsg(`${many}\n收尾：下一步要我提交吗？`));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.equal((sent.match(/\[代码块\]/g) || []).length, 0);
+	assert.match(sent, /收尾：下一步要我提交吗/, '结尾正文必须还在');
+	// 30 个占位符若不去掉，光标记就要 30 × 5 = 150 字符
+	assert.ok(sent.length < 1500, `输入应当被压下来，实际 ${sent.length} 字符`);
+});
+
+test('表格占位符同样不占预算', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('看表'));
+	h.emit(session, assistantMsg('| a | b |\n| - | - |\n| 1 | 2 |\n表格下面的正文。'));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.equal((sent.match(/\[表格\]/g) || []).length, 0);
+	assert.match(sent, /表格下面的正文/);
+});

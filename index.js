@@ -344,6 +344,15 @@ function cleanAssistant(a, stripPrefixes) {
 		}).join('\n');
 	}
 	s = s.replace(/(^\|.*\|[ \t]*(\n|$))+/gm, '[表格]\n');
+	// 占位符本身对“猜下一句”没有信息量，只占预算：实测尾部 1800 字里标记占 6.9%。
+	// 注意不能按行折叠——真实数据里每个占位符后面紧跟正文（行尾就是正文，不是说明文字），
+	// 按行折叠会把正文一起吞掉。这里只去掉标记本身，正文原样保留。
+	const hadPlaceholder = /\[(?:代码块|表格)\]/.test(s);
+	s = s.replace(/[ \t]*\[(?:代码块|表格)\][ \t]*/g, '\n');
+	s = s.replace(/^[ \t]+/gm, '').replace(/[ \t]+$/gm, '');
+	s = s.replace(/\n{3,}/g, '\n\n').trim();
+	// 整段只有代码块/表格时保留一个标记，避免助手内容变成空
+	if (hadPlaceholder && s === '') s = '[代码块]';
 	return s.replace(/\n{3,}/g, '\n\n').trim();
 }
 
