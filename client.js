@@ -240,30 +240,61 @@ window.__ModuleLoader__.load({
 		}
 
 		/** dock 槽组件：framework 管布局；建议存在才挂载，打字/已关闭时折叠（不卸载，保住动画）。 */
+		/** 拼接：把一条建议另起一行追加到已有草稿后面（去掉多余的尾部空白，避免堆空行）。 */
+		function appendSuggestion(base, add) {
+			const b = String(base ?? "").replace(/\s+$/, "");
+			const a = String(add ?? "").trim();
+			if (a === "") return b;
+			if (b === "") return a;
+			return `${b}\n${a}`;
+		}
+
 		function SuggestBarDock({ sessionId, inputActions }) {
 			const suggestion = useSuggestion(sessionId);
 			const draft = useDraft(sessionId);
 			const [dismissedTurn, setDismissedTurn] = react.useState(-1);
 			const [pick, setPick] = react.useState(0);
+			// 本批还没采纳过的建议下标；null = 尚未初始化（等价于"全部待选"）
+			const [pool, setPool] = react.useState(null);
+			// 采纳动作自己写进草稿的值：用来区分"采纳产生的草稿"和"用户自己打的字"
+			const [adoptedDraft, setAdoptedDraft] = react.useState("");
 			const texts = suggestion !== null && Array.isArray(suggestion.texts) ? suggestion.texts : [];
 			const stamp = suggestion !== null ? `${suggestion.turn}:${texts.join("|")}` : "";
-			// 新一批建议到达 → 回到第一条
-			react.useEffect(() => { setPick(0); }, [stamp]);
+			// 新一批建议到达 → 全部待选、回到第一条
+			react.useEffect(() => { setPick(0); setPool(null); setAdoptedDraft(""); }, [stamp]);
+			// 草稿被清空 → 采纳过的也放回来（保留"清空草稿自动展开"的老手感）
+			react.useEffect(() => {
+				if (draft.trim() === "") { setPool(null); setAdoptedDraft(""); }
+			}, [draft]);
 			useStyle();
 			if (suggestion === null || sessionId === undefined || texts.length === 0) return null;
-			const folded = draft.trim() !== "" || suggestion.turn === dismissedTurn;
+			const all = texts.map((_, i) => i);
+			const open = Array.isArray(pool) ? pool : all;
+			if (open.length === 0) return null; // 全部采纳完，卡片自然消失
+			const pos = Math.min(pick, open.length - 1);
+			const current = texts[open[pos]];
+			// 只有"用户自己打的字"才折叠；采纳写进去的草稿不算，卡片继续留着
+			const typedByUser = draft.trim() !== "" && draft.trim() !== adoptedDraft.trim();
+			const folded = typedByUser || suggestion.turn === dismissedTurn;
 			const label = typeof suggestion.label === "string" && suggestion.label !== "" ? suggestion.label : "建议";
-			const index = Math.min(pick, texts.length - 1);
-			const current = texts[index];
+			// 拼接基准：草稿是空的、或仍等于我们上次写进去的值，就用那个值——否则用草稿。
+			// 这是为了防"连点两次采用"：第二次点击时 shell 的草稿可能还没落定，
+			// 直接读 draft 会读到空串，把第一条覆盖掉。
+			const baseDraft = (draft.trim() === "" || draft.trim() === adoptedDraft.trim()) ? adoptedDraft : draft;
 			const adopt = () => {
-				if (inputActions && typeof inputActions.setDraft === "function") inputActions.setDraft(current);
+				const next = appendSuggestion(baseDraft, current);
+				setAdoptedDraft(next);
+				if (inputActions && typeof inputActions.setDraft === "function") inputActions.setDraft(next);
+				// 采纳过的那条从卡片里去掉，剩下的继续留着
+				setPool(open.filter((i) => i !== open[pos]));
+				setPick(0);
 			};
-			const send = () => sendAsUser(sessionId, current);
+			const send = () => sendAsUser(sessionId, appendSuggestion(baseDraft, current));
 			const close = () => setDismissedTurn(suggestion.turn);
-			const cycle = () => setPick((prev) => (prev + 1) % texts.length);
+			const cycle = () => setPick((prev) => (prev + 1) % open.length);
 			return el(SuggestCard, {
 				text: current, label, folded, onUse: adopt, onSend: send, onDismiss: close,
-				index, total: texts.length, onCycle: cycle,
+				index: pos, total: open.length, onCycle: cycle,
 			});
 		}
 
