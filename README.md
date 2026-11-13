@@ -20,12 +20,12 @@ dsh 插件列表里还有两个做同一件事的插件。下表按**各自仓�
 | 思考档位 | 可选，且能「测试」探测支持哪档 | 写死 `off` | 无 |
 | 与原生建议撞车 | `skipProviders` 可跳过 | 无 | 无 |
 | 代码量 | 61.7 KB / 1283 行 | 108.6 KB / 2665 行 | **25.5 KB / 548 行** |
-| 测试 | **没有** | 5 个测试文件 | 2 个测试文件 |
+| 测试 | host 侧 21 条用例；client 侧暂无 | 5 个测试文件（含 client） | 2 个测试文件（含 client） |
 | 分发 | GitHub 源码 | GitHub Release tarball + npm | GitHub 源码 |
 
 ### 我们不如它们的地方
 
-- **没有测试。** 两个竞品都有 host / client 测试，我们一行都没有，这是明确短板。
+- **client 侧还没测试。** host 侧有 21 条用例，浏览器侧（卡片渲染、打字折叠、轮播）目前只靠手测。
 - **比 tab-complete 重 2.4 倍。** 如果只要「灰字补全 + Tab 填入」这一个功能，那个更合适。
 - **「发送」是取舍，不是纯优点。** 两个竞品都刻意不代发（prompt-for-me 明写 never sends a message automatically）。我们少一步确认，也少一道保险。
 - **交互细节没 prompt-for-me 细。** 它有 Esc 关闭、清空草稿自动复现、把跳过的候选回喂给模型避免重复；这些我们没做。
@@ -85,12 +85,26 @@ provider（下拉识别）/ 模型（下拉联动）/ 标签文案 / **思考档
 - 建议持久化在插件目录 `suggestions.json`，host 重启后恢复（刻意不写会话日志——自定义事件类型会让宿主事件校验拒载整本日志）
 - 打字时建议卡折叠（0.35s 动画），清空草稿自动展开；✕ 只对本回合生效
 
+## 测试
+
+```sh
+npm install   # 只装 devDependencies（@deepseek-ai/dsh-llm / schemastery），跑测试用
+npm test
+```
+
+host 侧 21 条，走的是「假装一个 ctx → 发会话事件 → 读路由返回什么」这条路，断言的都是外部能观察到的结果（路由返回、`llm.stream` 有没有被调用、落盘文件内容），不贴内部实现。
+
+数据目录默认就是插件目录；测试会把 `SUGGEST_BAR_DATA_DIR` 指到临时目录，所以不会读到也不会写坏真实的 `config.json` / `suggestions.json`。
+
+client 侧（浏览器）还没有测试，目前靠手测。
+
 ## 排障
 
 设置面板打开「调试日志」→ 复现一轮 → 看插件目录的 `debug.log`（`dbg()` 同时写 stdout 和该文件；DSH 的 stdout 走 supervisord 管道，读不到，所以落盘）。全链路探针（事件→转录→路由→每次尝试的耗时/失败原因→解析出的条数与文本）都在。收工后记得关回去。
 
 ## 版本
 
+- v0.4.2 补 host 侧测试（21 条，`npm test`）；数据目录支持 `SUGGEST_BAR_DATA_DIR` 覆盖，测试不再碰真实 config.json / suggestions.json
 - v0.4.1 修 `@deepseek-ai/dsh-llm` 的 peer 范围：原 `>=0.2.0-rc.2` 按 semver 预发布规则只匹配 0.2.0-rc.2，装到 0.2.1/0.2.2 的预发布宿主上会被解析成旧版本；改为显式 `||` 分支覆盖 0.2.x
 - v0.4.0 自管 config.json + settings.section 设置面板 + provider/模型下拉识别；标签默认「建议」（动态下发，零硬编码）
 - v0.3.0 dock 槽流式布局 + 主题自适应卡片（主题变量/底角方半径/折叠动画）

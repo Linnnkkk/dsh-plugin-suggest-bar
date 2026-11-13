@@ -17,6 +17,7 @@
  * 刻意的取舍：不写自定义会话事件（宿主事件校验会拒载整本日志）；建议持久化到独立 suggestions.json 而非会话日志。
  */
 import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import z from '@deepseek-ai/schemastery';
 import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -27,9 +28,12 @@ const CONFIG_ROUTE_PATH = '/api/suggest-bar/config';
 const OPTIONS_ROUTE_PATH = '/api/suggest-bar/options';
 const EFFORT_TEST_ROUTE_PATH = '/api/suggest-bar/test-effort';
 const PURPOSE = 'suggest-bar';
-const CONFIG_PATH = fileURLToPath(new URL('./config.json', import.meta.url));
-const STORE_PATH = fileURLToPath(new URL('./suggestions.json', import.meta.url));
-const DEBUG_PATH = fileURLToPath(new URL('./debug.log', import.meta.url));
+// 数据目录默认就是插件目录本身。测试用 SUGGEST_BAR_DATA_DIR 指向临时目录，
+// 否则会读到真实的 config.json / suggestions.json，甚至把它们写坏。
+const DATA_DIR = process.env.SUGGEST_BAR_DATA_DIR ?? fileURLToPath(new URL('.', import.meta.url));
+const CONFIG_PATH = join(DATA_DIR, 'config.json');
+const STORE_PATH = join(DATA_DIR, 'suggestions.json');
+const DEBUG_PATH = join(DATA_DIR, 'debug.log');
 const DEBUG_MAX_BYTES = 2 * 1024 * 1024; // 超过就重开，避免无界增长
 const STORE_MAX = 200;         // 持久化上限：只保留最近 N 个会话的建议
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-suggest-bar",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "license": "MIT",
   "description": "Input-box-top next-prompt suggestion bar for dsh web: async side-call after each completed turn (reply-first, async-suggestion two-phase UX), tap-friendly adopt/send/dismiss buttons",
   "type": "module",
@@ -10,10 +10,17 @@
     "./client": "./client.js",
     "./package.json": "./package.json"
   },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.2.1-0 || >=0.2.1-rc.1 <0.2.2-0 || >=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/schemastery": "^3.18.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.2.2-rc.2",
+    "@deepseek-ai/schemastery": "^3.19.0"
   },
   "dsh": {
     "bundle": {

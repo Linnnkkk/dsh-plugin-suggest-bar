@@ -4,3 +4,6 @@ suggestions.json
 *.log
 # 本机运行配置（首启由 cordis.patch.yml 种子生成），不入库
 config.json
+
+# 测试/开发依赖（不随插件分发）
+node_modules/
