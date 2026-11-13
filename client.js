@@ -384,11 +384,25 @@ window.__ModuleLoader__.load({
 					onChange: (e) => update({ [field]: e.target.checked }) }));
 		}
 
+		/** 数字字段：和 TextField 一样用本地草稿。受控 input 没有 onChange 在 React 里就是只读，
+		 *  之前这里漏了 onChange，导致「总超时 / 输出上限 / 最大字符数」三个框根本改不动。 */
 		function NumberField({ label, hint, field, cfg, update, min }) {
 			const value = cfg === null ? "" : String(cfg[field] ?? "");
+			const [text, setText] = react.useState(value);
+			react.useEffect(() => { setText(value); }, [value]);
+			const floor = typeof min === "number" ? min : 0;
+			const commit = () => {
+				const raw = String(text).trim();
+				// 清空 = 放弃这次修改，回到原值（不写一个 0 进去）
+				if (raw === "" || !Number.isFinite(Number(raw))) { setText(value); return; }
+				const n = Math.max(floor, Math.floor(Number(raw)));
+				setText(String(n));
+				if (n !== Number(value)) update({ [field]: n });
+			};
 			return el(Field, { label, hint },
-				el("input", { className: "dsh-sb-input", type: "number", min, value,
-					onBlur: (e) => { const n = Math.max(min, Number(e.target.value)); if (Number.isFinite(n)) update({ [field]: n }); },
+				el("input", { className: "dsh-sb-input", type: "number", min, value: text,
+					onChange: (e) => setText(e.target.value),
+					onBlur: commit,
 					onKeyDown: (e) => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } } }));
 		}
 
