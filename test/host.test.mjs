@@ -752,3 +752,85 @@ test('表格占位符同样不占预算', async () => {
 	assert.equal((sent.match(/\[表格\]/g) || []).length, 0);
 	assert.match(sent, /表格下面的正文/);
 });
+
+// ---------- Q. 工具调用说明清理 ----------
+
+/** U+2060 零宽连接符：真实数据里工具说明标记的锚点。 */
+const CAP = '\u2060';
+const cap = (glyph, tool, tail) => `${glyph}${CAP} ${tool}${tail}`;
+
+test('工具调用说明不再进输入（❯ Bash · Result）', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('改一下'));
+	h.emit(session, assistantMsg('先看看代码。\n``` ' + cap('❯', 'Bash', ' · Result') + '\n跑通了，要我提交吗？'));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.ok(!sent.includes(CAP), '零宽锚点不该出现');
+	assert.match(sent, /先看看代码/, '说明前面的正文要保留');
+	assert.match(sent, /跑通了，要我提交吗/, '说明后面的正文要保留');
+});
+
+test('同一行连续多个说明一并清掉，正文不受影响', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('看截图'));
+	// 真实形态：一行里连着两个说明
+	h.emit(session, assistantMsg(
+		'两站都看得见烟： ' + cap('▤', 'Read', ' `/tmp/a.png`') + ' ' + cap('▤', 'Read', ' · Result'),
+	));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.ok(!sent.includes(CAP), '两个说明都该被清掉');
+	assert.match(sent, /两站都看得见烟/, '正文保留');
+});
+
+test('✎ 和 ▤ 两种标记同样清掉', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('写文件'));
+	h.emit(session, assistantMsg(
+		'写好了： ' + cap('✎', 'Write', ' `/tmp/x.ts`') + '\n读了配置： ' + cap('▤', 'Read', ' `/tmp/y.json`'),
+	));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.ok(!sent.includes(CAP));
+	assert.match(sent, /写好了/);
+	assert.match(sent, /读了配置/);
+});
+
+test('只有工具说明、没有正文时，助手侧不会变成空', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('跑一下'));
+	h.emit(session, assistantMsg('``` ' + cap('❯', 'Bash', ' · Result')));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	// 不该因为助手侧为空而跳过生成
+	assert.equal(h.streamCalls.length, 1, '助手侧被清空后仍应发起生成');
+});
+
+test('正文里单独出现的标记字符不被当成工具说明', async () => {
+	// 这里 ❯/✎/▤ 后面没有 U+2060，是普通正文（比如在讲符号含义），不能被当成说明删掉
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('讲讲符号'));
+	h.emit(session, assistantMsg('用 ❯ 表示命令提示符，用 ✎ 表示写入，后面这段是正文，必须保留。'));
+	h.emit(session, turnEnd(1));
+	await waitForSuggestion(h, session.id);
+
+	const sent = requestText(h.streamCalls[0]);
+	assert.match(sent, /后面这段是正文，必须保留/, '裸标记字符后面的正文不能丢');
+});
