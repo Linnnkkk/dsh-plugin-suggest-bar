@@ -1,5 +1,7 @@
 # 运行期数据：含真实会话 ID 与建议文本，禁止入库
 suggestions.json
+# 命中率统计：含用户消息片段，禁止入库
+feedback.jsonl
 # 本机调试日志
 *.log
 # 本机运行配置（首启由 cordis.patch.yml 种子生成），不入库

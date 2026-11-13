@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
 		const CONFIG_ROUTE = "/api/suggest-bar/config";
 		const OPTIONS_ROUTE = "/api/suggest-bar/options";
 		const EFFORT_TEST_ROUTE = "/api/suggest-bar/test-effort";
+		const STATS_ROUTE = "/api/suggest-bar/stats";
 		const POLL_MS = 700;
 		const STYLE_ID = "dsh-suggest-bar-style";
 		const inject = ["slots"];
@@ -295,6 +296,26 @@ window.__ModuleLoader__.load({
 			return { cfg, update, savedOn };
 		}
 
+		function useStats() {
+			const [stats, setStats] = react.useState(null);
+			const refresh = react.useCallback(() => {
+				fetch(STATS_ROUTE, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) })
+					.then((r) => r.json())
+					.then((b) => { if (b && typeof b === "object" && b.stats) setStats(b.stats); })
+					.catch(() => {});
+			}, []);
+			react.useEffect(() => { refresh(); }, [refresh]);
+			return { stats, refresh };
+		}
+
+		/** 命中率的可读文案：完全一致 / 改了字也算用上 / 第几条命中。 */
+		function statsText(s) {
+			if (s === null) return "读取中…";
+			if (!s || !s.total) return "还没有可评估的回合（用几轮后再看）";
+			const by = Array.isArray(s.byIndex) ? s.byIndex.map((n) => n ?? 0).join(" / ") : "";
+			return `最近 ${s.total} 回合：完全命中 ${s.exact}（${s.exactRate}%），改了字也算用上 ${s.usefulRate}%；第 1/2/3 条命中 ${by}`;
+		}
+
 		function Field({ label, hint, children }) {
 			return el("div", { className: "dsh-sb-row" },
 				el("label", null, label),
@@ -487,6 +508,7 @@ window.__ModuleLoader__.load({
 		/** 设置节组件：自取配置（不依赖任何传入 props）。 */
 		function SuggestBarSettings() {
 			const { cfg, update, savedOn } = usePluginConfig();
+			const { stats, refresh } = useStats();
 			const hostProviders = usePluginOptions();
 			const dirGroups = useModelDirectory();
 			const [testing, setTesting] = react.useState(false);
@@ -578,6 +600,11 @@ window.__ModuleLoader__.load({
 				el(NumberField, { label: "总超时(ms)", field: "timeoutMs", cfg, update, min: 1000 }),
 				el(NumberField, { label: "输出 token 上限", field: "maxOutputTokens", cfg, update, min: 16 }),
 				el(NumberField, { label: "建议最大字符数", field: "maxSuggestionChars", cfg, update, min: 10 }),
+				el("div", { className: "dsh-sb-row" },
+					el("label", null, "命中率"),
+					el("span", { className: "dsh-sb-hint" }, statsText(stats)),
+					el("button", { className: "dsh-sb-test", type: "button", onClick: () => refresh() }, "刷新"),
+				),
 				el(CheckField, { label: "调试日志", hint: "全链路写 ~/dsh.log", field: "debug", cfg, update }),
 				el("div", { className: "dsh-sb-row" },
 					el("span", { className: "dsh-sb-saved", "data-on": savedOn ? "" : undefined }, "✓ 已保存")),

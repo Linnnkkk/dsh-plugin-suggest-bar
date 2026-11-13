@@ -101,6 +101,7 @@ function makeCtx({ reply = '默认建议', providers = [], models = {}, modelInf
 		readConfig: async () => post(CONFIG_ROUTE, {}),
 		writeConfig: async (patch) => post(CONFIG_ROUTE, patch),
 		readOptions: async () => post(OPTIONS_ROUTE, {}),
+		post: async (path, body) => post(path, body),
 	};
 }
 
@@ -126,6 +127,7 @@ const turnStart = () => ({ type: 'turn/start', data: {} });
 
 /** 走完一轮用户→助手→回合结束，触发一次生成。 */
 function playTurn(harness, session, { turn = 1, user = '把这个改一下', assistant = '改好了。' } = {}) {
+	harness.emit(session, turnStart());
 	harness.emit(session, userMsg(user));
 	harness.emit(session, assistantMsg(assistant));
 	harness.emit(session, turnEnd(turn));
@@ -407,4 +409,203 @@ test('重启后能从 suggestions.json 恢复建议（含旧版单条格式）',
 	assert.deepEqual((await h.readSuggestion('legacy-session')).texts, ['旧格式的一条建议']);
 	assert.deepEqual((await h.readSuggestion('new-session')).texts, ['新格式一', '新格式二']);
 	h.unmount();
+});
+
+// ---------- I. 工具结果进输入（②） ----------
+
+/** 一轮完整流程：turn/start → 用户 → 助手 → 工具 → turn/end。 */
+function playTurnWithTool(h, session, { turn = 1, failed = true } = {}) {
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('把这个改一下'));
+	h.emit(session, assistantMsg('改完了，跑一下测试。'));
+	h.emit(session, { type: 'tool/call', data: { name: 'Bash', callId: 'c1', step: 1, turn } });
+	h.emit(session, { type: 'tool/result', data: { message: { isError: failed, toolCallId: 'c1' }, step: 1, turn } });
+	h.emit(session, turnEnd(turn));
+}
+
+const requestText = (call) => call.messages[0].content.map((b) => b.text).join('\n');
+
+test('把本轮最后一步的工具结果喂给模型（失败）', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurnWithTool(h, session, { failed: true });
+	await waitForSuggestion(h, session.id);
+
+	assert.equal(h.streamCalls.length, 1);
+	const sent = requestText(h.streamCalls[0]);
+	assert.match(sent, /最后一步/, '输入里应当带上最后一步');
+	assert.match(sent, /Bash/, '应当带上工具名');
+	assert.match(sent, /失败/, '失败要如实标注');
+});
+
+test('工具成功时标注成功', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurnWithTool(h, session, { failed: false });
+	await waitForSuggestion(h, session.id);
+
+	assert.match(requestText(h.streamCalls[0]), /成功/);
+});
+
+test('新一轮开始后，上一轮的工具结论不会带进来', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurnWithTool(h, session, { turn: 1, failed: true });
+	await waitForSuggestion(h, session.id);
+
+	// 第二轮没有工具调用
+	playTurn(h, session, { turn: 2 });
+	await new Promise((r) => setTimeout(r, 30));
+	const last = requestText(h.streamCalls[h.streamCalls.length - 1]);
+	assert.doesNotMatch(last, /最后一步/, '上一轮的工具结论应当已作废');
+});
+
+// ---------- J. 同一回合只生成一次（④） ----------
+
+test('同一回合重复 turn/end 不会再花一次 token', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { turn: 1 });
+	await waitForSuggestion(h, session.id);
+	assert.equal(h.streamCalls.length, 1);
+
+	h.emit(session, turnEnd(1));
+	await settle();
+	assert.equal(h.streamCalls.length, 1, '同一回合不该重复调用');
+});
+
+test('下一回合照常生成（去重是按回合，不是按会话）', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { turn: 1 });
+	await waitForSuggestion(h, session.id);
+
+	h.emit(session, turnEnd(2));
+	await settle();
+	assert.equal(h.streamCalls.length, 2);
+});
+
+// ---------- K. 历史预算瘦身（④） ----------
+
+test('历史只带最近 2 条用户消息', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	// 连续 4 轮，让历史积累起来
+	for (const turn of [1, 2, 3, 4]) {
+		h.emit(session, userMsg(`第${turn}句`));
+		h.emit(session, assistantMsg('好。'));
+		h.emit(session, turnEnd(turn));
+		await settle();
+	}
+	const last = requestText(h.streamCalls[h.streamCalls.length - 1]);
+	const historyLines = last.split('\n').filter((l) => l.startsWith('- 第'));
+	assert.equal(historyLines.length, 2, '历史只保留最近 2 条');
+});
+
+// ---------- L. 输出上限（③） ----------
+
+test('输出上限默认 512，够放 3 条长建议', async () => {
+	const h = await freshHarness();
+	const { config } = await h.readConfig();
+	assert.equal(config.maxOutputTokens, 512);
+});
+
+test('思考档位为 off 时，请求的输出上限用配置值', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+	assert.equal(h.streamCalls[0].maxTokens, 512);
+});
+
+// ---------- M. 命中率统计（①） ----------
+
+const statsOf = async (h) => (await h.post('/api/suggest-bar/stats', {})).stats;
+
+/** 统计文件是跨用例共享的，评估类用例开始前先清空。 */
+const resetFeedback = () => writeFileSync(join(DATA_DIR, 'feedback.jsonl'), '', 'utf8');
+
+test('用户发出的下一句与建议完全一致 → 记为 exact 命中', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('先跑测试'));
+
+	const stats = await statsOf(h);
+	assert.equal(stats.total, 1);
+	assert.equal(stats.exact, 1);
+	assert.equal(stats.exactRate, 100);
+	assert.equal(stats.byIndex[0], 1, '命中的是第 1 条');
+});
+
+test('采用后又改了字 → 记为 prefix（部分命中）', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('先跑测试吧，跑完贴结果'));
+
+	const stats = await statsOf(h);
+	assert.equal(stats.prefix, 1);
+	assert.equal(stats.exact, 0);
+	assert.equal(stats.usefulRate, 100);
+});
+
+test('用户说了完全不相干的话 → 记为 miss', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('算了，先别弄这个了'));
+
+	const stats = await statsOf(h);
+	assert.equal(stats.miss, 1);
+	assert.equal(stats.exactRate, 0);
+});
+
+test('没出建议的回合不参与统计（NONE 不算 miss）', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: 'NONE' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await settle();
+
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('随便说点别的'));
+	await settle();
+
+	const stats = await statsOf(h);
+	assert.equal(stats.total, 0, '没有建议就没有可评估的对象');
+});
+
+test('统计在多次回合上累计', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { turn: 1 });
+	await waitForSuggestion(h, session.id);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('先跑测试'));
+
+	h.emit(session, assistantMsg('跑完了。'));
+	h.emit(session, turnEnd(2));
+	await waitForSuggestion(h, session.id);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('完全不同的要求'));
+
+	const stats = await statsOf(h);
+	assert.equal(stats.total, 2);
+	assert.equal(stats.exact, 1);
+	assert.equal(stats.miss, 1);
+	assert.equal(stats.exactRate, 50);
 });

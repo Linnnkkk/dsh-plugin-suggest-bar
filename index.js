@@ -27,6 +27,7 @@ const ROUTE_PATH = '/api/suggest-bar';
 const CONFIG_ROUTE_PATH = '/api/suggest-bar/config';
 const OPTIONS_ROUTE_PATH = '/api/suggest-bar/options';
 const EFFORT_TEST_ROUTE_PATH = '/api/suggest-bar/test-effort';
+const STATS_ROUTE_PATH = '/api/suggest-bar/stats';
 const PURPOSE = 'suggest-bar';
 // 数据目录默认就是插件目录本身。测试用 SUGGEST_BAR_DATA_DIR 指向临时目录，
 // 否则会读到真实的 config.json / suggestions.json，甚至把它们写坏。
@@ -34,6 +35,8 @@ const DATA_DIR = process.env.SUGGEST_BAR_DATA_DIR ?? fileURLToPath(new URL('.', 
 const CONFIG_PATH = join(DATA_DIR, 'config.json');
 const STORE_PATH = join(DATA_DIR, 'suggestions.json');
 const DEBUG_PATH = join(DATA_DIR, 'debug.log');
+const FEEDBACK_PATH = join(DATA_DIR, 'feedback.jsonl');
+const FEEDBACK_MAX_LINES = 500; // 只留最近 N 次评估，够看趋势又不至于无限长
 const DEBUG_MAX_BYTES = 2 * 1024 * 1024; // 超过就重开，避免无界增长
 const STORE_MAX = 200;         // 持久化上限：只保留最近 N 个会话的建议
 
@@ -65,6 +68,12 @@ const store = new Map();    // sessionId -> { turn: number, text: string }
 const running = new Map();  // sessionId -> boolean
 const pending = new Map();  // sessionId -> AbortController
 const lastTurn = new Map(); // sessionId -> { user: string, assistant: string }
+/** 本轮最后一次工具调用的成败：给模型看"实际发生了什么"，而不只是助手自己怎么说。 */
+const lastStep = new Map(); // sessionId -> { name: string, ok: boolean|undefined }
+const callNames = new Map(); // callId -> tool name（tool/result 只带 toolCallId，靠它回查）
+const generatedTurn = new Map(); // sessionId -> turn（同一回合只生成一次，防重复调用）
+/** 待评估的建议副本：turn/start 会作废 store 里的显示副本，但评估要用到它。 */
+const pendingEval = new Map(); // sessionId -> { turn, texts }
 const warned = new Set();
 /** when-active 模式：前端最近一次轮询时间（有轮询=有人正在看这个对话）。 */
 const lastPoll = new Map();   // sessionId -> timestamp
@@ -107,10 +116,88 @@ function setSuggestion(sessionId, value) {
 	store.delete(sessionId); // 重新插入 → 保持 Map 按最近更新排序
 	store.set(sessionId, value);
 	while (store.size > STORE_MAX) store.delete(store.keys().next().value);
+	// 留一份待评估副本：turn/start 会先把 store 里的作废掉（实测顺序是 start → user/message），
+	// 那份副本必须活到用户真正发出下一条消息，否则永远评估不到。
+	pendingEval.set(sessionId, { turn: value.turn, texts: value.texts });
+	while (pendingEval.size > STORE_MAX) pendingEval.delete(pendingEval.keys().next().value);
 	saveStoreSoon();
 }
 function dropSuggestion(sessionId) {
 	if (store.delete(sessionId)) saveStoreSoon();
+}
+
+// ---------- 命中率统计（本地，只落本机文件，不上报） ----------
+
+/** 把「建议 vs 用户实际发出的下一句」比对一次，追加一行。 */
+function recordFeedback(rec) {
+	try {
+		appendFileSync(FEEDBACK_PATH, `${JSON.stringify(rec)}\n`, 'utf8');
+		const lines = readFileSync(FEEDBACK_PATH, 'utf8').split('\n').filter((l) => l !== '');
+		if (lines.length > FEEDBACK_MAX_LINES) {
+			writeFileSync(FEEDBACK_PATH, `${lines.slice(-FEEDBACK_MAX_LINES).join('\n')}\n`, 'utf8');
+		}
+	} catch (error) {
+		dbg('feedback: 落盘失败:', error instanceof Error ? error.message : String(error));
+	}
+}
+
+/**
+ * 用户真正发话时评估上一条建议。
+ * exact=一模一样；prefix=采用后改过（一方是另一方前缀）；miss=没用。
+ */
+function evaluateSuggestion(sessionId, actualText) {
+	const pending = pendingEval.get(sessionId);
+	pendingEval.delete(sessionId);
+	if (pending === undefined || pending.texts.length === 0 || actualText === '') return;
+	let match = 'miss';
+	let index = -1;
+	const norm = (s) => s.trim();
+	const actual = norm(actualText);
+	for (let i = 0; i < pending.texts.length; i += 1) {
+		const t = norm(pending.texts[i]);
+		if (t === '') continue;
+		if (t === actual) { match = 'exact'; index = i; break; }
+		if (match !== 'prefix' && (actual.startsWith(t) || t.startsWith(actual))) { match = 'prefix'; index = i; }
+	}
+	recordFeedback({
+		at: new Date().toISOString(),
+		turn: pending.turn,
+		match,
+		index,
+		// 只留长度与极短摘要，避免把整段对话写进统计文件
+		actualLen: actual.length,
+		actualHead: actual.slice(0, 40),
+		texts: pending.texts.map((t) => t.slice(0, 60)),
+	});
+}
+
+/** 读 feedback.jsonl 汇总。按条数、按命中类型、按第几条命中。 */
+function feedbackStats(limit = FEEDBACK_MAX_LINES) {
+	let records = [];
+	try {
+		records = readFileSync(FEEDBACK_PATH, 'utf8')
+			.split('\n').filter((l) => l !== '')
+			.slice(-limit)
+			.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+			.filter((r) => r !== null && typeof r.match === 'string');
+	} catch { /* 还没产生过反馈 */ }
+	const total = records.length;
+	const exact = records.filter((r) => r.match === 'exact').length;
+	const prefix = records.filter((r) => r.match === 'prefix').length;
+	const byIndex = [0, 0, 0];
+	for (const r of records) {
+		if (typeof r.index === 'number' && r.index >= 0 && r.index < byIndex.length) byIndex[r.index] += 1;
+	}
+	const pct = (n) => (total === 0 ? null : Math.round((n / total) * 1000) / 10);
+	return {
+		total,
+		exact,
+		prefix,
+		miss: total - exact - prefix,
+		exactRate: pct(exact),
+		usefulRate: pct(exact + prefix),
+		byIndex,
+	};
 }
 
 /** 直写 stdout（dsh.log）的调试探针——不依赖 ctx.logger（实测 warn 不落盘）。 */
@@ -141,7 +228,7 @@ function resolveConfig(c) {
 		skipProviders: Array.isArray(c?.skipProviders) ? c.skipProviders.filter((x) => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : [],
 		labelText: typeof c?.labelText === 'string' && c.labelText.trim() !== '' ? c.labelText.trim() : '建议',
 		timeoutMs: numOr(c?.timeoutMs, 60000, 1000),
-		maxOutputTokens: numOr(c?.maxOutputTokens, 256, 16),
+		maxOutputTokens: numOr(c?.maxOutputTokens, 512, 16),
 		maxSuggestionChars: numOr(c?.maxSuggestionChars, 120, 10),
 		maxInputBytes: numOr(c?.maxInputBytes, 10240, 512),
 		generateMode: c?.generateMode === 'when-active' ? 'when-active' : 'always',
@@ -206,7 +293,7 @@ function textOfContent(content) {
 function noteTurn(sessionId, key, text) {
 	const t = lastTurn.get(sessionId) ?? { user: '', assistant: '', history: [] };
 	if (key === 'user' && t.user !== '' && t.user !== text) {
-		t.history = [...t.history, t.user].slice(-3); // 之前几条用户消息：给模型看口吻和目标
+		t.history = [...t.history, t.user].slice(-2); // 之前几条用户消息：只学口吻，80 字/条够用
 		t.assistant = ''; // 新一轮开始，上一轮的助手回复作废
 	}
 	t[key] = text;
@@ -256,14 +343,20 @@ function tailBytes(s, n) {
 	return t;
 }
 
-/** 组装输入：之前几条用户消息 + 本轮用户 + 去噪后的助手回复（头尾）；超预算先丢历史，再从前面截。 */
-function frame(t, maxBytes, stripPrefixes = []) {
+/** 组装输入：之前几条用户消息 + 本轮用户 + 去噪后的助手回复（头尾）+ 最后一步的真实成败。超预算先丢历史，再从前面截。 */
+function frame(t, maxBytes, stripPrefixes = [], step) {
 	const current = [
 		`[用户本轮]\n${headTail(t.user, 300, 300)}`,
 		`[助手本轮回复（结尾最重要）]\n${headTail(cleanAssistant(t.assistant ?? '', stripPrefixes), 500, 1800)}`,
 	];
+	// 助手多半以"我做完了"收尾（实测 89%），但真正决定用户下一句是"修一下"还是"继续"的，
+	// 是那一步到底成没成。这一行约 30 token，是输入里性价比最高的一段。
+	if (step !== undefined && typeof step.name === 'string' && step.name !== '') {
+		const outcome = step.ok === true ? '成功' : (step.ok === false ? '失败' : '未回报');
+		current.push(`[本轮最后一步] ${step.name} → ${outcome}`);
+	}
 	const history = (t.history ?? []).length > 0
-		? [`[用户之前几条消息（学口吻，也看他习惯怎么下指令）]\n${t.history.map((h) => `- ${h.slice(0, 150).replace(/\n/g, ' ')}`).join('\n')}`]
+		? [`[用户之前几条消息（学口吻，也看他习惯怎么下指令）]\n${t.history.map((h) => `- ${h.slice(0, 80).replace(/\n/g, ' ')}`).join('\n')}`]
 		: [];
 	const full = [...history, ...current].join('\n\n');
 	if (Buffer.byteLength(full, 'utf8') <= maxBytes) return full;
@@ -369,7 +462,7 @@ async function generate(ctx, seedConfig, session, turn) {
 		}
 		if (config.debug) dbg('generate: route candidates', routeCandidates);
 		const messages = [createUserMessage({
-			content: [{ type: 'text', text: frame(t, config.maxInputBytes, config.stripLinePrefixes) }],
+			content: [{ type: 'text', text: frame(t, config.maxInputBytes, config.stripLinePrefixes, lastStep.get(session.id)) }],
 			source: { kind: 'suggest-bar', plugin: name, form: 'transcript' },
 		})];
 		const drain = async (opts) => {
@@ -435,9 +528,10 @@ async function generate(ctx, seedConfig, session, turn) {
 		const texts = cleanSuggestions(raw, config.maxSuggestionChars);
 		if (config.debug) dbg('generate: result', { rawLen: raw.length, count: texts.length, texts: texts.map((t) => t.slice(0, 40)) });
 		if (texts.length > 0) setSuggestion(session.id, { turn, texts });
-		else dropSuggestion(session.id);
+		else { dropSuggestion(session.id); pendingEval.delete(session.id); }
 	} catch (error) {
 		dropSuggestion(session.id);
+		pendingEval.delete(session.id);
 		if (!controller.signal.aborted) {
 			dbg('generate: FAILED', error instanceof Error ? `${error.message}\n${String(error.stack).split('\n')[1] ?? ''}` : String(error));
 		} else if (loadConfig(seedConfig).debug) {
@@ -462,7 +556,11 @@ function apply(ctx, config) {
 					// 实测载荷：user 消息的 blocks 在 data.content（assistant 才在 data.message.content）
 					const text = textOfContent(data.content ?? data.message?.content);
 					if (dbgOn()) dbg('event: user/message', { len: text.length, head: text.slice(0, 30) });
-					if (text !== '') noteTurn(session.id, 'user', text);
+					if (text !== '') {
+						// 用户真发了话 → 上一条建议是否命中，在这里结算
+						evaluateSuggestion(session.id, text);
+						noteTurn(session.id, 'user', text);
+					}
 				}
 				return;
 			}
@@ -471,17 +569,50 @@ function apply(ctx, config) {
 				if (text !== '') noteTurn(session.id, 'assistant', text);
 				return;
 			}
+			// 工具调用：记下「本轮最后一步做了什么、成没成」。助手 89% 以陈述收尾，
+			// 但用户下一句是"修一下"还是"继续"，取决于这一步的真实结果。
+			if (event.type === 'tool/call') {
+				const toolName = typeof data.name === 'string' ? data.name : '';
+				if (toolName !== '') {
+					lastStep.set(session.id, { name: toolName, ok: undefined });
+					if (typeof data.callId === 'string') {
+						callNames.set(data.callId, toolName);
+						while (callNames.size > 200) callNames.delete(callNames.keys().next().value);
+					}
+				}
+				return;
+			}
+			if (event.type === 'tool/result') {
+				const failed = data.message?.isError === true;
+				const callId = data.message?.toolCallId;
+				const known = typeof callId === 'string' ? callNames.get(callId) : undefined;
+				if (typeof callId === 'string') callNames.delete(callId);
+				const step = lastStep.get(session.id);
+				const toolName = known ?? step?.name;
+				if (typeof toolName === 'string' && toolName !== '') {
+					lastStep.set(session.id, { name: toolName, ok: !failed });
+				}
+				return;
+			}
 			if (event.type === 'turn/start') {
 				running.set(session.id, true);
 				pending.get(session.id)?.abort();
 				deferred.delete(session.id); // 用户已发话：欠账作废
-				dropSuggestion(session.id); // 用户已发话：旧建议立刻作废
+				dropSuggestion(session.id); // 用户已发话：旧建议立刻作废（待评估副本保留）
+				lastStep.delete(session.id); // 新一轮，上一步的结论作废
+				callNames.clear();
 				return;
 			}
 			if (event.type === 'turn/end') {
 				running.set(session.id, false);
 				if (dbgOn()) dbg('event: turn/end', { turn: data.turn, reason: data.reason?.kind });
 				if (data.reason?.kind === 'completed' && typeof data.turn === 'number') {
+					// 同一回合只生成一次：重复的 turn/end 不该再花一次 token
+					if (generatedTurn.get(session.id) === data.turn) {
+						if (dbgOn()) dbg('event: turn/end 该回合已生成过，跳过', { turn: data.turn });
+						return;
+					}
+					generatedTurn.set(session.id, data.turn);
 					if (dbgOn() && loadConfig(config).generateMode === 'when-active') {
 						dbg('event: turn/end 模式判定', { turn: data.turn, active: isActive(session.id) });
 					}
@@ -659,12 +790,23 @@ function apply(ctx, config) {
 			return Response.json({ providers });
 		},
 	}));
+	// 命中率统计路由：建议准不准，用真实"用户下一句"结算，只读本机文件
+	ctx.effect(() => ctx.connection.fetch.register({
+		path: STATS_ROUTE_PATH,
+		methods: ['POST'],
+		requestBody: 'buffered',
+		fetch: async () => Response.json({ stats: feedbackStats() }),
+	}));
 	ctx.effect(() => () => {
 		for (const controller of pending.values()) controller.abort();
 		pending.clear();
 		deferred.clear();
 		lastPoll.clear();
 		effortCache.clear();
+		lastStep.clear();
+		callNames.clear();
+		generatedTurn.clear();
+		pendingEval.clear();
 		if (saveTimer !== undefined) flushStore(); // 卸载/重启前落盘未写的建议
 	});
 }
