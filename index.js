@@ -29,6 +29,8 @@ const OPTIONS_ROUTE_PATH = '/api/suggest-bar/options';
 const EFFORT_TEST_ROUTE_PATH = '/api/suggest-bar/test-effort';
 const STATS_ROUTE_PATH = '/api/suggest-bar/stats';
 const PURPOSE = 'suggest-bar';
+/** 提示词版本：写进命中率记录，改提示词时手动改这里，统计才能按版本对比。 */
+const PROMPT_VERSION = 'v2.1-2026-11-15';
 // 数据目录默认就是插件目录本身。测试用 SUGGEST_BAR_DATA_DIR 指向临时目录，
 // 否则会读到真实的 config.json / suggestions.json，甚至把它们写坏。
 const DATA_DIR = process.env.SUGGEST_BAR_DATA_DIR ?? fileURLToPath(new URL('.', import.meta.url));
@@ -76,7 +78,7 @@ const lastStep = new Map(); // sessionId -> { name: string, ok: boolean|undefine
 const callNames = new Map(); // callId -> { sessionId, name }（tool/result 只带 toolCallId，靠它回查；带 sessionId 才能只清本会话）
 const generatedTurn = new Map(); // sessionId -> turn（同一回合只生成一次，防重复调用）
 /** 待评估的建议副本：turn/start 会作废 store 里的显示副本，但评估要用到它。 */
-const pendingEval = new Map(); // sessionId -> { turn, texts }
+const pendingEval = new Map(); // sessionId -> { turn, texts, meta, readyAt, doneAt, shown }
 const warned = new Set();
 /** when-active 模式：前端最近一次轮询时间（有轮询=有人正在看这个对话）。 */
 const lastPoll = new Map();   // sessionId -> timestamp
@@ -115,13 +117,30 @@ function flushStore() {
 function saveStoreSoon() {
 	if (saveTimer === undefined) saveTimer = setTimeout(flushStore, 500);
 }
-function setSuggestion(sessionId, value) {
+/**
+ * meta = { source: 'local'|'model', model, prompt, startedAt }，只进命中率记录。
+ * 流式生成时同一回合会被调用多次（每多解析出一行调一次），
+ * 首次的 readyAt、前端是否已读到（shown）要沿用，不能被后续调用覆盖。
+ * partial=true 表示还在生成，doneAt 留空。
+ */
+function setSuggestion(sessionId, value, meta, partial = false) {
 	store.delete(sessionId); // 重新插入 → 保持 Map 按最近更新排序
 	store.set(sessionId, value);
 	while (store.size > STORE_MAX) store.delete(store.keys().next().value);
 	// 留一份待评估副本：turn/start 会先把 store 里的作废掉（实测顺序是 start → user/message），
 	// 那份副本必须活到用户真正发出下一条消息，否则永远评估不到。
-	pendingEval.set(sessionId, { turn: value.turn, texts: value.texts });
+	const prev = pendingEval.get(sessionId);
+	const same = prev !== undefined && prev.turn === value.turn ? prev : undefined;
+	const now = Date.now();
+	pendingEval.delete(sessionId);
+	pendingEval.set(sessionId, {
+		turn: value.turn,
+		texts: value.texts,
+		meta: meta ?? same?.meta,
+		readyAt: same?.readyAt ?? now,
+		doneAt: partial ? undefined : now,
+		shown: same?.shown ?? false,
+	});
 	while (pendingEval.size > STORE_MAX) pendingEval.delete(pendingEval.keys().next().value);
 	saveStoreSoon();
 }
@@ -146,8 +165,36 @@ function recordFeedback(rec) {
 
 /**
  * 用户真正发话时评估上一条建议。
- * exact=一模一样；prefix=采用后改过（一方是另一方前缀）；miss=没用。
+ * exact=一模一样；prefix=采用后改过（一方是另一方前缀）；
+ * similar=字不一样但意思几乎一样（相似度 ≥ SIMILAR_MIN）；miss=没用。
  */
+/**
+ * 两句话的字面相似度（字符二元组 Dice，0..1）。只比两者共同长度、最多 40 字：
+ * 用户常在建议后面多补一句，不该因此被判不像。
+ * 阈值 0.6 来自 80 条真实记录：真同义的两条是 0.78/0.88，其后最高的误判只有 0.46。
+ */
+const SIMILAR_MIN = 0.6;
+function similarity(a, b) {
+	const norm = (s) => s.toLowerCase().replace(/\s+/g, '');
+	const n = Math.min(norm(a).length, norm(b).length, 40);
+	if (n < 2) return 0;
+	const x = norm(a).slice(0, n);
+	const y = norm(b).slice(0, n);
+	const gy = new Map();
+	for (let i = 0; i < n - 1; i += 1) gy.set(y.slice(i, i + 2), (gy.get(y.slice(i, i + 2)) ?? 0) + 1);
+	let common = 0;
+	for (let i = 0; i < n - 1; i += 1) {
+		const k = x.slice(i, i + 2);
+		const c = gy.get(k) ?? 0;
+		if (c > 0) { common += 1; gy.set(k, c - 1); }
+	}
+	return common / (n - 1);
+}
+
+function msSince(start, end) {
+	return typeof start === 'number' && typeof end === 'number' ? end - start : undefined;
+}
+
 function evaluateSuggestion(sessionId, actualText) {
 	const pending = pendingEval.get(sessionId);
 	pendingEval.delete(sessionId);
@@ -162,6 +209,13 @@ function evaluateSuggestion(sessionId, actualText) {
 		if (t === actual) { match = 'exact'; index = i; break; }
 		if (match !== 'prefix' && (actual.startsWith(t) || t.startsWith(actual))) { match = 'prefix'; index = i; }
 	}
+	if (match === 'miss') {
+		let best = SIMILAR_MIN;
+		for (let i = 0; i < pending.texts.length; i += 1) {
+			const score = similarity(pending.texts[i], actual);
+			if (score >= best) { best = score; match = 'similar'; index = i; }
+		}
+	}
 	recordFeedback({
 		at: new Date().toISOString(),
 		turn: pending.turn,
@@ -171,6 +225,16 @@ function evaluateSuggestion(sessionId, actualText) {
 		actualLen: actual.length,
 		actualHead: actual.slice(0, 40),
 		texts: pending.texts.map((t) => t.slice(0, 60)),
+		// 归因：哪条路出的、哪个模型、哪版提示词
+		source: pending.meta?.source,
+		model: pending.meta?.model,
+		prompt: pending.meta?.prompt,
+		// 时序（毫秒，从回合结束起算）：第一条出现 / 全部出完 / 用户发出下一句
+		readyMs: msSince(pending.meta?.startedAt, pending.readyAt),
+		doneMs: msSince(pending.meta?.startedAt, pending.doneAt),
+		replyMs: msSince(pending.meta?.startedAt, Date.now()),
+		// 用户发话前前端是否真读到过这条建议（没读到 = 没机会被看见，miss 不该怪预测）
+		shown: pending.shown === true,
 	});
 }
 
@@ -187,18 +251,26 @@ function feedbackStats(limit = FEEDBACK_MAX_LINES) {
 	const total = records.length;
 	const exact = records.filter((r) => r.match === 'exact').length;
 	const prefix = records.filter((r) => r.match === 'prefix').length;
+	const similar = records.filter((r) => r.match === 'similar').length;
 	const byIndex = [0, 0, 0];
 	for (const r of records) {
 		if (typeof r.index === 'number' && r.index >= 0 && r.index < byIndex.length) byIndex[r.index] += 1;
 	}
 	const pct = (n) => (total === 0 ? null : Math.round((n / total) * 1000) / 10);
+	// 只看「用户发话前建议已经显示出来」的回合（老记录没有 shown 字段，不计入）
+	const seen = records.filter((r) => r.shown === true);
+	const seenHit = seen.filter((r) => r.match !== 'miss').length;
 	return {
 		total,
 		exact,
 		prefix,
-		miss: total - exact - prefix,
+		similar,
+		miss: total - exact - prefix - similar,
 		exactRate: pct(exact),
 		usefulRate: pct(exact + prefix),
+		closeRate: pct(exact + prefix + similar),
+		shownTotal: seen.length,
+		shownCloseRate: seen.length === 0 ? null : Math.round((seenHit / seen.length) * 1000) / 10,
 		byIndex,
 	};
 }
@@ -329,6 +401,7 @@ function systemPrompt(count) {
 		'只说用户真会发的：指令、纠正、要求下一步、追问、解释/诊断；状态汇报、观察、猜测、评价不写。',
 		'口吻照抄他最近几条：口语、直接、短，十个字能说完不用二十个。',
 		'助手让他选 → 写那个选项；助手做完 → 下一步做什么；助手卡住/有遗留 → 让它接着处理那件事。不替助手说话，不用「另外」「顺便」串多句。',
+		'助手说修好了/改完了，但效果得他亲眼看（界面、卡顿、真机、刷新后、音视频）→ 他常回「没好」：至少一条写这种反馈，带上具体现象（如「刷新了，还是卡」「顶部还是乱的」）。',
 		`最多输出 ${count} 行，每行一条，各覆盖一个不同方向（同意/纠正/追问/换思路/补充约束等），可能性从高到低；凑不出这么多不同方向就少给，不要换说法凑数；无序号、引号、Markdown、解释。`,
 		'都没把握就只输出 NONE。',
 	].join('\n');
@@ -359,6 +432,43 @@ function cleanAssistant(a, stripPrefixes) {
 	// 整段只有代码块/表格时保留一个标记，避免助手内容变成空
 	if (hadPlaceholder && s === '') s = '[代码块]';
 	return s.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * 助手以「列选项 + 让你挑」收尾时，本地直接给出选项，不调模型（零 token）。
+ * 只认结尾处连续编号（A/B/C… 或 1/2/3…，从 A/1 起）且至少 2 个的选项，
+ * 选项之后的收尾语里必须有「选/哪个/还是」这类让人挑的字眼——光有编号的总结清单不算。
+ * 助手写了推荐（推荐 B / 建议选 2）就把它排第一。没识别出来返回 null，照常走模型。
+ */
+function localChoices(assistant, stripPrefixes, maxCount) {
+	const s = cleanAssistant(assistant ?? '', stripPrefixes);
+	const lines = s.split('\n');
+	const optRe = /^(?:[-*]\s+)?(?:\*\*)?(?:方案|选项)?\s*([A-F]|[1-9])\s*(?:[.、:：)）]|\*\*)/;
+	let last = -1;
+	for (let i = lines.length - 1; i >= 0; i -= 1) {
+		if (optRe.test(lines[i])) { last = i; break; }
+	}
+	if (last < 0) return null;
+	const closing = lines.slice(last + 1).join('\n');
+	if (closing.length > 300) return null; // 选项不在结尾，后面还有大段正文
+	// 往前收集同一组选项：编号要从末项连续递减到 A / 1
+	const labels = [];
+	let expect = null;
+	for (let i = last; i >= 0 && last - i <= 40; i -= 1) {
+		const m = optRe.exec(lines[i]);
+		if (!m) continue;
+		const label = m[1];
+		if (expect !== null && label !== expect) break;
+		labels.unshift(label);
+		if (label === 'A' || label === '1') break;
+		expect = String.fromCharCode(label.charCodeAt(0) - 1);
+	}
+	if (labels.length < 2 || (labels[0] !== 'A' && labels[0] !== '1')) return null;
+	if (!/选|哪个|哪一|哪种|哪条|哪套|还是|拍板/.test(closing)) return null;
+	const numeric = labels[0] === '1';
+	const rec = /(?:推荐|建议|倾向)[^\n]{0,8}?(?:方案|选项)?\s*([A-F1-9])(?![A-Za-z0-9])/.exec(s.slice(-800));
+	const ordered = rec && labels.includes(rec[1]) ? [rec[1], ...labels.filter((l) => l !== rec[1])] : labels;
+	return ordered.slice(0, maxCount).map((l) => (numeric ? `选 ${l}` : l));
 }
 
 /** 保留开头（总结）和结尾（提问/下一步），中间省略。 */
@@ -462,6 +572,7 @@ async function ladderFor(ctx, provider, model, fallback) {
 
 async function generate(ctx, seedConfig, session, turn) {
 	const config = loadConfig(seedConfig);
+	const startedAt = Date.now();
 	const controller = new AbortController();
 	pending.set(session.id, controller);
 	const deadline = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -475,6 +586,13 @@ async function generate(ctx, seedConfig, session, turn) {
 		const sessionProvider = session.requestHeader?.()?.config?.provider;
 		if (sessionProvider !== undefined && config.skipProviders.includes(sessionProvider)) {
 			if (config.debug) dbg(`generate: skip (session provider "${sessionProvider}" in skipProviders)`);
+			return;
+		}
+		// 助手在让用户挑选项：本地直接出选项，不花 token
+		const choices = localChoices(t.assistant, config.stripLinePrefixes, config.maxSuggestions);
+		if (choices !== null) {
+			if (config.debug) dbg('generate: 本地选项（不调模型）', { texts: choices });
+			setSuggestion(session.id, { turn, texts: choices }, { source: 'local', startedAt });
 			return;
 		}
 		// 路由候选：配置的快车道优先，不可用则回退继承会话最近一次请求的路由
@@ -508,9 +626,26 @@ async function generate(ctx, seedConfig, session, turn) {
 		})];
 		const drain = async (opts) => {
 			const assembler = new BlockAssembler();
+			// 边生成边出卡：每解析出一条完整的行就先放进 store，前端下次轮询（700ms）即可显示。
+			// 只解析到最后一个换行为止，没写完的半行不出；cleanSuggestions 对前缀是稳定的，
+			// 所以先出的几条不会在最终结果里变样。
+			let streamed = '';
+			let shownCount = 0;
 			for await (const chunk of ctx.llm.stream(opts)) {
 				controller.signal.throwIfAborted();
 				assembler.push(chunk);
+				if (chunk.type !== 'text-delta' || typeof chunk.text !== 'string') continue;
+				streamed += chunk.text;
+				const cut = streamed.lastIndexOf('\n');
+				if (cut < 0) continue;
+				if ((streamed.match(/```/g) ?? []).length % 2 === 1) continue; // 代码围栏还没闭合：等它闭合再解析
+				const partial = cleanSuggestions(streamed.slice(0, cut), config.maxSuggestionChars, config.maxSuggestions);
+				if (partial.length > shownCount) {
+					shownCount = partial.length;
+					setSuggestion(session.id, { turn, texts: partial },
+						{ source: 'model', model: `${opts.provider}/${opts.model}`, prompt: PROMPT_VERSION, startedAt }, true);
+					if (config.debug) dbg(`generate: 流式先出第 ${shownCount} 条 ${Date.now() - startedAt}ms`);
+				}
 			}
 			const finish = assembler.finish;
 			if (finish !== undefined && finish !== null && finish.kind !== 'stop') {
@@ -523,9 +658,9 @@ async function generate(ctx, seedConfig, session, turn) {
 		};
 		/** 思考档位梯子（兜底用）：off 最省 → low → 不传（模型默认）。 */
 		const EFFORT_LADDER = ['off', 'low', undefined];
-		const startedAt = Date.now();
 		let blocks;
 		let attemptError;
+		let usedModel;
 		outer:
 		for (const route of routeCandidates) {
 			// 设置里测过就用它（零开销）；否则问这个模型支持哪些档（带缓存）；再不行退回梯子
@@ -553,6 +688,7 @@ async function generate(ctx, seedConfig, session, turn) {
 				try {
 					blocks = await drain(options(effort));
 					attemptError = undefined;
+					usedModel = `${route.provider}/${route.model}`;
 					dbg(`generate: 成功 via ${route.provider}/${route.model} effort=${String(effort)} 用时${Date.now() - t0}ms 总${Date.now() - startedAt}ms`);
 					break outer;
 				} catch (error) {
@@ -572,7 +708,7 @@ async function generate(ctx, seedConfig, session, turn) {
 		const raw = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n');
 		const texts = cleanSuggestions(raw, config.maxSuggestionChars, config.maxSuggestions);
 		if (config.debug) dbg('generate: result', { rawLen: raw.length, count: texts.length, texts: texts.map((t) => t.slice(0, 40)) });
-		if (texts.length > 0) setSuggestion(session.id, { turn, texts });
+		if (texts.length > 0) setSuggestion(session.id, { turn, texts }, { source: 'model', model: usedModel, prompt: PROMPT_VERSION, startedAt });
 		else { dropSuggestion(session.id); pendingEval.delete(session.id); }
 	} catch (error) {
 		dropSuggestion(session.id);
@@ -707,7 +843,11 @@ function apply(ctx, config) {
 			let suggestion = null;
 			if (sessionId !== undefined && !running.get(sessionId)) {
 				const s = store.get(sessionId);
-				if (s !== undefined) suggestion = { turn: s.turn, texts: s.texts, label: loadConfig(config).labelText };
+				if (s !== undefined) {
+					suggestion = { turn: s.turn, texts: s.texts, label: loadConfig(config).labelText };
+					const pe = pendingEval.get(sessionId);
+					if (pe !== undefined && pe.turn === s.turn) pe.shown = true;
+				}
 			}
 			return Response.json({ suggestion });
 		},

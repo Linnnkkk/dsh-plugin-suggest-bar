@@ -254,22 +254,24 @@ window.__ModuleLoader__.load({
 			const draft = useDraft(sessionId);
 			const [dismissedTurn, setDismissedTurn] = react.useState(-1);
 			const [pick, setPick] = react.useState(0);
-			// 本批还没采纳过的建议下标；null = 尚未初始化（等价于"全部待选"）
-			const [pool, setPool] = react.useState(null);
+			// 本批已采纳过的建议下标。记"用过的"而不是"剩下的"：流式生成时后续几条陆续到达，
+			// 新来的自然就在待选里，不会因为列表变长而把已采纳的又放回来
+			const [adopted, setAdopted] = react.useState([]);
 			// 采纳动作自己写进草稿的值：用来区分"采纳产生的草稿"和"用户自己打的字"
 			const [adoptedDraft, setAdoptedDraft] = react.useState("");
 			const texts = suggestion !== null && Array.isArray(suggestion.texts) ? suggestion.texts : [];
-			const stamp = suggestion !== null ? `${suggestion.turn}:${texts.join("|")}` : "";
+			// 批次标识只看回合 + 第一条：流式时后面几条陆续补上不算新一批（否则会把用户刚采纳的状态清掉）；
+			// 第一条变了（如换路由重试后结果不同）才算新一批
+			const stamp = suggestion !== null ? `${suggestion.turn}:${texts[0] ?? ""}` : "";
 			// 新一批建议到达 → 全部待选、回到第一条
-			react.useEffect(() => { setPick(0); setPool(null); setAdoptedDraft(""); }, [stamp]);
+			react.useEffect(() => { setPick(0); setAdopted([]); setAdoptedDraft(""); }, [stamp]);
 			// 草稿被清空 → 采纳过的也放回来（保留"清空草稿自动展开"的老手感）
 			react.useEffect(() => {
-				if (draft.trim() === "") { setPool(null); setAdoptedDraft(""); }
+				if (draft.trim() === "") { setAdopted([]); setAdoptedDraft(""); }
 			}, [draft]);
 			useStyle();
 			if (suggestion === null || sessionId === undefined || texts.length === 0) return null;
-			const all = texts.map((_, i) => i);
-			const open = Array.isArray(pool) ? pool : all;
+			const open = texts.map((_, i) => i).filter((i) => !adopted.includes(i));
 			if (open.length === 0) return null; // 全部采纳完，卡片自然消失
 			const pos = Math.min(pick, open.length - 1);
 			const current = texts[open[pos]];
@@ -286,7 +288,7 @@ window.__ModuleLoader__.load({
 				setAdoptedDraft(next);
 				if (inputActions && typeof inputActions.setDraft === "function") inputActions.setDraft(next);
 				// 采纳过的那条从卡片里去掉，剩下的继续留着
-				setPool(open.filter((i) => i !== open[pos]));
+				setAdopted([...adopted, open[pos]]);
 				setPick(0);
 			};
 			const send = () => sendAsUser(sessionId, appendSuggestion(baseDraft, current));
@@ -344,7 +346,7 @@ window.__ModuleLoader__.load({
 			if (s === null) return "读取中…";
 			if (!s || !s.total) return "还没有可评估的回合（用几轮后再看）";
 			const by = Array.isArray(s.byIndex) ? s.byIndex.map((n) => n ?? 0).join(" / ") : "";
-			return `最近 ${s.total} 回合：完全命中 ${s.exact}（${s.exactRate}%），改了字也算用上 ${s.usefulRate}%；第 1/2/3 条命中 ${by}`;
+			return `最近 ${s.total} 回合：完全命中 ${s.exact}（${s.exactRate}%），改了字也算用上 ${s.usefulRate}%${typeof s.closeRate === "number" ? `，意思接近也算 ${s.closeRate}%` : ""}${s.shownTotal ? `；其中你发话前已显示的 ${s.shownTotal} 回合命中 ${s.shownCloseRate}%` : ""}；第 1/2/3 条命中 ${by}`;
 		}
 
 		function Field({ label, hint, children }) {

@@ -57,6 +57,10 @@ function makeCtx({ reply = '默认建议', providers = [], models = {}, modelInf
 						{ type: 'finish', reason: { kind: 'stop' } },
 					]
 					: out;
+				if (chunks && typeof chunks[Symbol.asyncIterator] === 'function') {
+					for await (const chunk of chunks) yield chunk; // 流式用例：可在中途卡住
+					return;
+				}
 				for (const chunk of chunks) yield chunk;
 			},
 			listProviders: () => providers,
@@ -833,4 +837,196 @@ test('正文里单独出现的标记字符不被当成工具说明', async () =>
 
 	const sent = requestText(h.streamCalls[0]);
 	assert.match(sent, /后面这段是正文，必须保留/, '裸标记字符后面的正文不能丢');
+});
+
+// ---------- 2026-11-15：本地选项 / 意思接近 / 没修好分支 ----------
+
+test('助手列 A/B 让用户挑：本地出选项，不调模型', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 3 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { assistant: '两个方向：\nA. 先读透那段代码\nB. 直接上补丁\n\n你选哪个？' });
+	const s = await waitForSuggestion(h, session.id);
+	assert.deepEqual(s.texts, ['A', 'B']);
+	assert.equal(h.streamCalls.length, 0, '不该花 token');
+});
+
+test('助手写了推荐：推荐项排第一；数字选项写成「选 N」', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 3 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { assistant: '**1. 改提示词**\n说明\n**2. 换模型**\n说明\n**3. 减条数**\n说明\n\n我推荐 3，你选哪个？' });
+	const s = await waitForSuggestion(h, session.id);
+	assert.deepEqual(s.texts, ['选 3', '选 1', '选 2']);
+	assert.equal(h.streamCalls.length, 0);
+});
+
+test('编号清单只是总结（没让挑）：照常调模型', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 3 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { assistant: '做完了：\n1. 修了 A\n2. 修了 B\n\n要推送吗？' });
+	await waitForSuggestion(h, session.id);
+	assert.equal(h.streamCalls.length, 1);
+});
+
+test('选项不在结尾（后面还有大段正文）：照常调模型', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 3 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { assistant: 'A. 甲\nB. 乙\n' + '后面还有很多分析。'.repeat(40) + '\n你选哪个？' });
+	await waitForSuggestion(h, session.id);
+	assert.equal(h.streamCalls.length, 1);
+});
+
+test('字不一样但意思几乎一样 → 记为 similar，不算 miss', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: '推送 GitHub 先，token 弄好了没' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('推送 GitHub 先，Token 不是已经更新过了吗？看 Github 技能。'));
+	const stats = await statsOf(h);
+	assert.equal(stats.similar, 1);
+	assert.equal(stats.miss, 0);
+	assert.equal(stats.closeRate, 100);
+	assert.equal(stats.usefulRate, 0, '严格口径不受影响');
+});
+
+test('沾边但不同义 → 仍是 miss', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: '刷新后还是卡，上 CDP 帧采样定位长帧' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('刷新后还是卡，主要还是OMC的对话框卡，你回忆一下'));
+	const stats = await statsOf(h);
+	assert.equal(stats.miss, 1);
+});
+
+
+// ---------- 2026-11-15：命中记录的归因与时序字段 ----------
+
+const lastFeedback = () => {
+	const lines = readFileSync(join(DATA_DIR, 'feedback.jsonl'), 'utf8').split('\n').filter((l) => l !== '');
+	return JSON.parse(lines[lines.length - 1]);
+};
+
+test('模型出的建议：记录来源、模型、提示词版本和时序', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id); // 读到 = 前端显示过
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('先跑测试'));
+	const r = lastFeedback();
+	assert.equal(r.source, 'model');
+	assert.equal(r.model, 'p/m');
+	assert.match(String(r.prompt), /^v/);
+	assert.equal(r.shown, true);
+	for (const k of ['readyMs', 'doneMs', 'replyMs']) assert.equal(typeof r[k], 'number', k);
+	assert.ok(r.readyMs <= r.doneMs && r.doneMs <= r.replyMs);
+});
+
+test('前端没读到就被用户抢先发话：shown=false，且不进「已显示」口径', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await settle(); // 生成完了，但不读
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('说点别的'));
+	assert.equal(lastFeedback().shown, false);
+	const stats = await statsOf(h);
+	assert.equal(stats.total, 1);
+	assert.equal(stats.shownTotal, 0);
+});
+
+test('本地选项：记录来源为 local，没有模型', async () => {
+	resetFeedback();
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 3 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { assistant: 'A. 甲\nB. 乙\n选哪个？' });
+	await waitForSuggestion(h, session.id);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('A'));
+	const r = lastFeedback();
+	assert.equal(r.source, 'local');
+	assert.equal(r.model, undefined);
+	assert.equal(r.match, 'exact');
+	const stats = await statsOf(h);
+	assert.equal(stats.shownTotal, 1);
+	assert.equal(stats.shownCloseRate, 100);
+});
+
+// ---------- 2026-11-15：流式出卡 ----------
+
+test('流式：第 1 行写完就能读到，不等整段生成结束', async () => {
+	let release;
+	const gate = new Promise((r) => { release = r; });
+	const h = await freshHarness({
+		reply: () => (async function* () {
+			yield { type: 'text-delta', index: 0, text: '先跑测' };
+			yield { type: 'text-delta', index: 0, text: '试\n再' };
+			await gate; // 卡在第 2 行中间
+			yield { type: 'text-delta', index: 0, text: '提交\n' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		})(),
+	});
+	await h.writeConfig({ maxSuggestions: 3 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	const early = await waitForSuggestion(h, session.id);
+	assert.deepEqual(early.texts, ['先跑测试'], '半行「再」不该出');
+	release();
+	const startedAt = Date.now();
+	let final;
+	while (Date.now() - startedAt < 2000) {
+		final = await h.readSuggestion(session.id);
+		if (final && final.texts.length === 2) break;
+		await new Promise((r) => setTimeout(r, 10));
+	}
+	assert.deepEqual(final.texts, ['先跑测试', '再提交']);
+});
+
+test('流式：代码围栏没闭合时不出半截内容', async () => {
+	let release;
+	const gate = new Promise((r) => { release = r; });
+	const h = await freshHarness({
+		reply: () => (async function* () {
+			yield { type: 'text-delta', index: 0, text: '```\n围栏里的东西\n' };
+			await gate;
+			yield { type: 'text-delta', index: 0, text: '```\n真正的建议\n' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		})(),
+	});
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await settle();
+	assert.equal(await h.readSuggestion(session.id), null);
+	release();
+	const s = await waitForSuggestion(h, session.id);
+	assert.deepEqual(s.texts, ['真正的建议']);
+});
+
+test('流式中途失败：先出的建议被撤掉，不留残卡', async () => {
+	let release;
+	const gate = new Promise((r) => { release = r; });
+	const h = await freshHarness({
+		reply: () => (async function* () {
+			yield { type: 'text-delta', index: 0, text: '第一条\n' };
+			await gate;
+			throw new Error('boom');
+		})(),
+	});
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	assert.ok(await waitForSuggestion(h, session.id));
+	release();
+	await settle();
+	assert.equal(await h.readSuggestion(session.id), null);
 });
