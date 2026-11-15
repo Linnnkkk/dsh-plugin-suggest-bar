@@ -2,6 +2,8 @@
 suggestions.json
 # 命中率统计：含用户消息片段，禁止入库
 feedback.jsonl
+# 离线回放：真实会话片段 + 模型回复缓存 + 明细，只留本机
+replay-data/
 # 本机调试日志（含轮转出来的 debug.log.1）
 *.log
 *.log.1

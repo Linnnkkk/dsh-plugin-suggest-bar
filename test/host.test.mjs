@@ -851,14 +851,22 @@ test('助手列 A/B 让用户挑：本地出选项，不调模型', async () => 
 	assert.equal(h.streamCalls.length, 0, '不该花 token');
 });
 
-test('助手写了推荐：推荐项排第一；数字选项写成「选 N」', async () => {
+test('助手写了推荐：推荐项排第一', async () => {
 	const h = await freshHarness();
 	await h.writeConfig({ maxSuggestions: 3 });
 	const session = nextSession(ROUTE_A);
-	playTurn(h, session, { assistant: '**1. 改提示词**\n说明\n**2. 换模型**\n说明\n**3. 减条数**\n说明\n\n我推荐 3，你选哪个？' });
+	playTurn(h, session, { assistant: '**A. 改提示词**\n说明\n**B. 换模型**\n说明\n**C. 减条数**\n说明\n\n我推荐 C，你选哪个？' });
 	const s = await waitForSuggestion(h, session.id);
-	assert.deepEqual(s.texts, ['选 3', '选 1', '选 2']);
+	assert.deepEqual(s.texts, ['C', 'A', 'B']);
 	assert.equal(h.streamCalls.length, 0);
+});
+
+test('数字编号的方案让挑：不走本地（真实数据里用户从不只回「选 1」），照常调模型', async () => {
+	const h = await freshHarness();
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session, { assistant: '1. 改提示词\n2. 换模型\n3. 减条数\n\n你选哪个？' });
+	await waitForSuggestion(h, session.id);
+	assert.equal(h.streamCalls.length, 1);
 });
 
 test('编号清单只是总结（没让挑）：照常调模型', async () => {
@@ -1030,3 +1038,4 @@ test('流式中途失败：先出的建议被撤掉，不留残卡', async () =>
 	await settle();
 	assert.equal(await h.readSuggestion(session.id), null);
 });
+

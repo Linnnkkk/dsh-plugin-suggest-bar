@@ -436,14 +436,16 @@ function cleanAssistant(a, stripPrefixes) {
 
 /**
  * 助手以「列选项 + 让你挑」收尾时，本地直接给出选项，不调模型（零 token）。
- * 只认结尾处连续编号（A/B/C… 或 1/2/3…，从 A/1 起）且至少 2 个的选项，
+ * 只认结尾处连续的字母选项（A/B/C…，从 A 起）且至少 2 个，
  * 选项之后的收尾语里必须有「选/哪个/还是」这类让人挑的字眼——光有编号的总结清单不算。
- * 助手写了推荐（推荐 B / 建议选 2）就把它排第一。没识别出来返回 null，照常走模型。
+ * 助手写了推荐（推荐 B）就把它排第一。没识别出来返回 null，照常走模型。
+ * 数字编号（1/2/3）不认：离线回放 331 条真实对话里触发 27 次、命中 0 次——数字列表几乎都是
+ * 分点说明/计划/问题清单，用户回的是「按你说的来」「做 234」「先做第 3 步」，不会只回「选 1」。
  */
 function localChoices(assistant, stripPrefixes, maxCount) {
 	const s = cleanAssistant(assistant ?? '', stripPrefixes);
 	const lines = s.split('\n');
-	const optRe = /^(?:[-*]\s+)?(?:\*\*)?(?:方案|选项)?\s*([A-F]|[1-9])\s*(?:[.、:：)）]|\*\*)/;
+	const optRe = /^(?:[-*]\s+)?(?:\*\*)?(?:方案|选项)?\s*([A-F])\s*(?:[.、:：)）]|\*\*)/;
 	let last = -1;
 	for (let i = lines.length - 1; i >= 0; i -= 1) {
 		if (optRe.test(lines[i])) { last = i; break; }
@@ -460,15 +462,14 @@ function localChoices(assistant, stripPrefixes, maxCount) {
 		const label = m[1];
 		if (expect !== null && label !== expect) break;
 		labels.unshift(label);
-		if (label === 'A' || label === '1') break;
+		if (label === 'A') break;
 		expect = String.fromCharCode(label.charCodeAt(0) - 1);
 	}
-	if (labels.length < 2 || (labels[0] !== 'A' && labels[0] !== '1')) return null;
+	if (labels.length < 2 || labels[0] !== 'A') return null;
 	if (!/选|哪个|哪一|哪种|哪条|哪套|还是|拍板/.test(closing)) return null;
-	const numeric = labels[0] === '1';
-	const rec = /(?:推荐|建议|倾向)[^\n]{0,8}?(?:方案|选项)?\s*([A-F1-9])(?![A-Za-z0-9])/.exec(s.slice(-800));
+	const rec = /(?:推荐|建议|倾向)[^\n]{0,8}?(?:方案|选项)?\s*([A-F])(?![A-Za-z0-9])/.exec(s.slice(-800));
 	const ordered = rec && labels.includes(rec[1]) ? [rec[1], ...labels.filter((l) => l !== rec[1])] : labels;
-	return ordered.slice(0, maxCount).map((l) => (numeric ? `选 ${l}` : l));
+	return ordered.slice(0, maxCount);
 }
 
 /** 保留开头（总结）和结尾（提问/下一步），中间省略。 */
