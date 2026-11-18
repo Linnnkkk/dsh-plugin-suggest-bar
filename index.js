@@ -109,7 +109,9 @@ function flushStore() {
 	clearTimeout(saveTimer);
 	saveTimer = undefined;
 	try {
-		writeFileSync(STORE_PATH, `${JSON.stringify(Object.fromEntries(store))}\n`, 'utf8');
+		// done 是运行时状态（是否还在流式生成），不落盘：磁盘格式保持 { turn, texts }
+		const persisted = Object.fromEntries([...store].map(([id, s]) => [id, { turn: s.turn, texts: s.texts }]));
+		writeFileSync(STORE_PATH, `${JSON.stringify(persisted)}\n`, 'utf8');
 	} catch (error) {
 		dbg('store: 写盘失败:', error instanceof Error ? error.message : String(error));
 	}
@@ -125,7 +127,8 @@ function saveStoreSoon() {
  */
 function setSuggestion(sessionId, value, meta, partial = false) {
 	store.delete(sessionId); // 重新插入 → 保持 Map 按最近更新排序
-	store.set(sessionId, value);
+	// done=false 表示还在生成（流式先出卡），前端/测试能据此区分半成品与终态
+	store.set(sessionId, { turn: value.turn, texts: value.texts, done: !partial });
 	while (store.size > STORE_MAX) store.delete(store.keys().next().value);
 	// 留一份待评估副本：turn/start 会先把 store 里的作废掉（实测顺序是 start → user/message），
 	// 那份副本必须活到用户真正发出下一条消息，否则永远评估不到。
@@ -845,7 +848,7 @@ function apply(ctx, config) {
 			if (sessionId !== undefined && !running.get(sessionId)) {
 				const s = store.get(sessionId);
 				if (s !== undefined) {
-					suggestion = { turn: s.turn, texts: s.texts, label: loadConfig(config).labelText };
+					suggestion = { turn: s.turn, texts: s.texts, done: s.done !== false, label: loadConfig(config).labelText };
 					const pe = pendingEval.get(sessionId);
 					if (pe !== undefined && pe.turn === s.turn) pe.shown = true;
 				}

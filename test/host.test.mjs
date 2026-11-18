@@ -137,12 +137,24 @@ function playTurn(harness, session, { turn = 1, user = '把这个改一下', ass
 	harness.emit(session, turnEnd(turn));
 }
 
-/** 生成是 fire-and-forget，这里轮询外部可见结果，等它出现。 */
+/** 生成是 fire-and-forget，这里轮询外部可见结果，等它出现。
+ *  注意：流式生成时首次出现的是半成品（done=false），要终态请用 waitForFinal。 */
 async function waitForSuggestion(harness, sessionId, timeoutMs = 2000) {
 	const startedAt = Date.now();
 	while (Date.now() - startedAt < timeoutMs) {
 		const suggestion = await harness.readSuggestion(sessionId);
 		if (suggestion !== null) return suggestion;
+		await new Promise((r) => setTimeout(r, 10));
+	}
+	return null;
+}
+
+/** 等到流式生成结束（done !== false）；断言最终条数/顺序的用例用它。 */
+async function waitForFinal(harness, sessionId, timeoutMs = 2000) {
+	const startedAt = Date.now();
+	while (Date.now() - startedAt < timeoutMs) {
+		const suggestion = await harness.readSuggestion(sessionId);
+		if (suggestion !== null && suggestion.done !== false) return suggestion;
 		await new Promise((r) => setTimeout(r, 10));
 	}
 	return null;
@@ -171,7 +183,7 @@ test('回合正常结束：生成建议并可从路由读到', async () => {
 	const session = nextSession(ROUTE_A);
 	playTurn(h, session);
 
-	const suggestion = await waitForSuggestion(h, session.id);
+	const suggestion = await waitForFinal(h, session.id);
 	assert.ok(suggestion, '应当能读到建议');
 	assert.equal(suggestion.turn, 1);
 	assert.deepEqual(suggestion.texts, ['先跑测试', '再提交']);
@@ -205,7 +217,7 @@ test('去掉序号、项目符号和包裹引号', async () => {
 	const session = nextSession(ROUTE_A);
 	playTurn(h, session);
 
-	const suggestion = await waitForSuggestion(h, session.id);
+	const suggestion = await waitForFinal(h, session.id);
 	assert.deepEqual(suggestion.texts, ['第一句', '第二句', '第三句']);
 });
 
