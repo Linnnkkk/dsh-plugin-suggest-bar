@@ -23,6 +23,7 @@ window.__ModuleLoader__.load({
 		const OPTIONS_ROUTE = "/api/suggest-bar/options";
 		const EFFORT_TEST_ROUTE = "/api/suggest-bar/test-effort";
 		const STATS_ROUTE = "/api/suggest-bar/stats";
+		const EVENT_ROUTE = "/api/suggest-bar/event";
 		const POLL_MS = 700;
 		const STYLE_ID = "dsh-suggest-bar-style";
 		const inject = ["slots"];
@@ -249,6 +250,22 @@ window.__ModuleLoader__.load({
 			return `${b}\n${a}`;
 		}
 
+		/**
+		 * 上报「采用 / 发送」给宿主：只记事件，不调模型。
+		 * 这是"有没有用"的口径——逐字命中只能量"猜得准不准"，
+		 * 采用后自己再改几句，逐字口径会记成 miss。
+		 */
+		function reportEvent(sessionId, turn, action, index) {
+			try {
+				fetch(EVENT_ROUTE, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ sessionId, turn, action, index }),
+					keepalive: true,
+				}).catch(() => {});
+			} catch { /* 上报失败不影响采用本身 */ }
+		}
+
 		function SuggestBarDock({ sessionId, inputActions }) {
 			const suggestion = useSuggestion(sessionId);
 			const draft = useDraft(sessionId);
@@ -287,11 +304,15 @@ window.__ModuleLoader__.load({
 				const next = appendSuggestion(baseDraft, current);
 				setAdoptedDraft(next);
 				if (inputActions && typeof inputActions.setDraft === "function") inputActions.setDraft(next);
+				reportEvent(sessionId, suggestion.turn, "adopt", open[pos]);
 				// 采纳过的那条从卡片里去掉，剩下的继续留着
 				setAdopted([...adopted, open[pos]]);
 				setPick(0);
 			};
-			const send = () => sendAsUser(sessionId, appendSuggestion(baseDraft, current));
+			const send = () => {
+				reportEvent(sessionId, suggestion.turn, "send", open[pos]);
+				sendAsUser(sessionId, appendSuggestion(baseDraft, current));
+			};
 			const close = () => setDismissedTurn(suggestion.turn);
 			const cycle = () => setPick((prev) => (prev + 1) % open.length);
 			return el(SuggestCard, {
@@ -341,12 +362,15 @@ window.__ModuleLoader__.load({
 			return { stats, refresh };
 		}
 
-		/** 命中率的可读文案：完全一致 / 改了字也算用上 / 第几条命中。 */
+		/** 命中率的可读文案：采用率 / 完全一致 / 改了字也算用上 / 第几条命中。 */
 		function statsText(s) {
 			if (s === null) return "读取中…";
 			if (!s || !s.total) return "还没有可评估的回合（用几轮后再看）";
 			const by = Array.isArray(s.byIndex) ? s.byIndex.map((n) => n ?? 0).join(" / ") : "";
-			return `最近 ${s.total} 回合：完全命中 ${s.exact}（${s.exactRate}%），改了字也算用上 ${s.usefulRate}%${typeof s.closeRate === "number" ? `，意思接近也算 ${s.closeRate}%` : ""}${s.shownTotal ? `；其中你发话前已显示的 ${s.shownTotal} 回合命中 ${s.shownCloseRate}%` : ""}；第 1/2/3 条命中 ${by}`;
+			const adopt = typeof s.adoptSample === "number" && s.adoptSample > 0
+				? `采用率 ${s.adoptRate}%（${s.adoptTurns}/${s.adoptSample} 回合被采用${s.sentTurns ? `，其中直接发送 ${s.sentTurns}` : ""}）`
+				: "采用率暂无（新口径从本次更新后开始记）";
+			return `${adopt}；最近 ${s.total} 回合逐字：完全命中 ${s.exact}（${s.exactRate}%），改了字也算用上 ${s.usefulRate}%${typeof s.closeRate === "number" ? `，意思接近也算 ${s.closeRate}%` : ""}${s.shownTotal ? `（发话前已显示的 ${s.shownTotal} 回合命中 ${s.shownCloseRate}%）` : ""}；第 1/2/3 条命中 ${by}`;
 		}
 
 		function Field({ label, hint, children }) {

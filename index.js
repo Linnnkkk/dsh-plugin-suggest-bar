@@ -28,6 +28,8 @@ const CONFIG_ROUTE_PATH = '/api/suggest-bar/config';
 const OPTIONS_ROUTE_PATH = '/api/suggest-bar/options';
 const EFFORT_TEST_ROUTE_PATH = '/api/suggest-bar/test-effort';
 const STATS_ROUTE_PATH = '/api/suggest-bar/stats';
+/** 前端上报「采用 / 发送」：只记事件，不产生模型调用。 */
+const EVENT_ROUTE_PATH = '/api/suggest-bar/event';
 const PURPOSE = 'suggest-bar';
 /** 提示词版本：写进命中率记录，改提示词时手动改这里，统计才能按版本对比。 */
 const PROMPT_VERSION = 'v2.1-2026-11-15';
@@ -143,6 +145,9 @@ function setSuggestion(sessionId, value, meta, partial = false) {
 		readyAt: same?.readyAt ?? now,
 		doneAt: partial ? undefined : now,
 		shown: same?.shown ?? false,
+		// 前端上报的采用/发送（下标，去重）；同一回合流式多次写入要沿用
+		adopted: same?.adopted ?? [],
+		sent: same?.sent ?? [],
 	});
 	while (pendingEval.size > STORE_MAX) pendingEval.delete(pendingEval.keys().next().value);
 	saveStoreSoon();
@@ -238,6 +243,10 @@ function evaluateSuggestion(sessionId, actualText) {
 		replyMs: msSince(pending.meta?.startedAt, Date.now()),
 		// 用户发话前前端是否真读到过这条建议（没读到 = 没机会被看见，miss 不该怪预测）
 		shown: pending.shown === true,
+		// 真实效用：这一批里被点「采用」/「发送」的下标。
+		// 逐字命中只量"猜得准不准"，采用量"有没有用"——点采用后自己再改，前者会记 miss。
+		adopted: Array.isArray(pending.adopted) ? pending.adopted : [],
+		sent: Array.isArray(pending.sent) ? pending.sent : [],
 	});
 }
 
@@ -260,6 +269,12 @@ function feedbackStats(limit = FEEDBACK_MAX_LINES) {
 		if (typeof r.index === 'number' && r.index >= 0 && r.index < byIndex.length) byIndex[r.index] += 1;
 	}
 	const pct = (n) => (total === 0 ? null : Math.round((n / total) * 1000) / 10);
+	// 采用率：只统计有 adopted 字段的记录（2026-11-18 之前的行没有这个字段，不进分母）
+	const withAdopt = records.filter((r) => Array.isArray(r.adopted));
+	const adoptTurns = withAdopt.filter((r) => r.adopted.length > 0).length;
+	const sentTurns = withAdopt.filter((r) => Array.isArray(r.sent) && r.sent.length > 0).length;
+	const candShown = withAdopt.reduce((n, r) => n + (Array.isArray(r.texts) ? r.texts.length : 0), 0);
+	const candAdopted = withAdopt.reduce((n, r) => n + r.adopted.length, 0);
 	// 只看「用户发话前建议已经显示出来」的回合（老记录没有 shown 字段，不计入）
 	const seen = records.filter((r) => r.shown === true);
 	const seenHit = seen.filter((r) => r.match !== 'miss').length;
@@ -275,6 +290,14 @@ function feedbackStats(limit = FEEDBACK_MAX_LINES) {
 		shownTotal: seen.length,
 		shownCloseRate: seen.length === 0 ? null : Math.round((seenHit / seen.length) * 1000) / 10,
 		byIndex,
+		// 采用率（2026-11-18 起才有）：回合口径 + 候选条口径
+		adoptSample: withAdopt.length,
+		adoptTurns,
+		adoptRate: withAdopt.length === 0 ? null : Math.round((adoptTurns / withAdopt.length) * 1000) / 10,
+		sentTurns,
+		candShown,
+		candAdopted,
+		candAdoptRate: candShown === 0 ? null : Math.round((candAdopted / candShown) * 1000) / 10,
 	};
 }
 
@@ -979,6 +1002,34 @@ function apply(ctx, config) {
 				dbg('options: 枚举失败:', error instanceof Error ? error.message : String(error));
 			}
 			return Response.json({ providers });
+		},
+	}));
+	// 前端上报「采用 / 发送」：记在当前回合并随下一句发话一起结算，不产生模型调用
+	ctx.effect(() => ctx.connection.fetch.register({
+		path: EVENT_ROUTE_PATH,
+		methods: ['POST'],
+		requestBody: 'buffered',
+		fetch: async (request) => {
+			let body;
+			try {
+				body = await request.json();
+			} catch {
+				body = undefined;
+			}
+			if (body === null || typeof body !== 'object') return Response.json({ ok: false });
+			const { sessionId, turn, action, index } = body;
+			if (typeof sessionId !== 'string' || sessionId === '' || (action !== 'adopt' && action !== 'send')) {
+				return Response.json({ ok: false });
+			}
+			const pe = pendingEval.get(sessionId);
+			if (pe === undefined || (Number.isInteger(turn) && pe.turn !== turn)) return Response.json({ ok: false });
+			const i = Number.isInteger(index) && index >= 0 ? index : undefined;
+			if (i !== undefined) {
+				const list = action === 'adopt' ? pe.adopted : pe.sent;
+				if (Array.isArray(list) && !list.includes(i)) list.push(i);
+			}
+			if (config.debug) dbg(`event: ${action} #${String(i)} turn=${pe.turn}`);
+			return Response.json({ ok: true });
 		},
 	}));
 	// 命中率统计路由：建议准不准，用真实"用户下一句"结算，只读本机文件

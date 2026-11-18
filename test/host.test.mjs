@@ -983,6 +983,106 @@ test('本地选项：记录来源为 local，没有模型', async () => {
 	assert.equal(stats.shownCloseRate, 100);
 });
 
+// ---------- 2026-11-18：采用率（真实效用口径） ----------
+
+const EVENT_ROUTE = '/api/suggest-bar/event';
+const reportEvent = (h, sessionId, turn, action, index) => h.post(EVENT_ROUTE, { sessionId, turn, action, index });
+
+test('点采用：下标记进反馈记录，采用率算 100%', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: '先跑测试\n再提交' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	const early = await waitForFinal(h, session.id);
+
+	await reportEvent(h, session.id, early.turn, 'adopt', 1);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('再提交'));
+
+	const r = lastFeedback();
+	assert.deepEqual(r.adopted, [1], '采用的下标要落进记录');
+	assert.deepEqual(r.sent, []);
+	assert.equal(r.match, 'exact', '逐字口径照旧');
+
+	const stats = await statsOf(h);
+	assert.equal(stats.adoptSample, 1);
+	assert.equal(stats.adoptTurns, 1);
+	assert.equal(stats.adoptRate, 100);
+	assert.equal(stats.sentTurns, 0);
+	assert.equal(stats.candShown, 2);
+	assert.equal(stats.candAdopted, 1);
+	assert.equal(stats.candAdoptRate, 50);
+});
+
+test('点发送：算用上了，但单独记在 sent 里', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: '先跑测试\n再提交' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	const s = await waitForFinal(h, session.id);
+
+	await reportEvent(h, session.id, s.turn, 'send', 0);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('先跑测试'));
+
+	const r = lastFeedback();
+	assert.deepEqual(r.sent, [0]);
+	assert.deepEqual(r.adopted, [], '发送不算采用');
+	const stats = await statsOf(h);
+	assert.equal(stats.adoptSample, 1);
+	assert.equal(stats.adoptTurns, 0, '采用率为 0：没点采用');
+	assert.equal(stats.sentTurns, 1);
+});
+
+test('同一条连续点两次采用，只记一次', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: '先跑测试\n再提交' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	const s = await waitForFinal(h, session.id);
+
+	await reportEvent(h, session.id, s.turn, 'adopt', 0);
+	await reportEvent(h, session.id, s.turn, 'adopt', 0);
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('先跑测试'));
+
+	assert.deepEqual(lastFeedback().adopted, [0]);
+});
+
+test('回合对不上的采用事件被忽略，不污染统计', async () => {
+	resetFeedback();
+	const h = await freshHarness({ reply: '先跑测试\n再提交' });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	const s = await waitForFinal(h, session.id);
+
+	const res = await reportEvent(h, session.id, s.turn + 5, 'adopt', 0);
+	assert.equal(res.ok, false, '过期回合的上报要被拒');
+
+	h.emit(session, turnStart());
+	h.emit(session, userMsg('再提交'));
+	assert.deepEqual(lastFeedback().adopted, []);
+});
+
+test('没有建议的会话上报被忽略（重启后恢复的卡片也算）', async () => {
+	const h = await freshHarness();
+	const res = await reportEvent(h, 'never-generated', 1, 'adopt', 0);
+	assert.equal(res.ok, false);
+});
+
+test('老记录（没有 adopted 字段）不进采用率分母', async () => {
+	writeFileSync(join(DATA_DIR, 'feedback.jsonl'), [
+		JSON.stringify({ at: '2026-11-12T00:00:00.000Z', turn: 1, match: 'exact', index: 0, texts: ['a'], shown: true }),
+		JSON.stringify({ at: '2026-11-12T00:00:01.000Z', turn: 2, match: 'miss', index: -1, texts: ['b'], shown: true }),
+		JSON.stringify({ at: '2026-11-18T00:00:00.000Z', turn: 3, match: 'miss', index: -1, texts: ['c'], shown: true, adopted: [0], sent: [] }),
+	].join('\n') + '\n', 'utf8');
+
+	const stats = await statsOf(await freshHarness());
+	assert.equal(stats.total, 3, '逐字口径照旧算全部');
+	assert.equal(stats.adoptSample, 1, '只有带 adopted 的那条进采用率');
+	assert.equal(stats.adoptRate, 100);
+});
+
 // ---------- 2026-11-15：流式出卡 ----------
 
 test('流式：第 1 行写完就能读到，不等整段生成结束', async () => {
