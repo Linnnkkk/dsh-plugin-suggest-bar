@@ -685,6 +685,31 @@ test('条数会写进提示词，模型才知道要给几条', async () => {
 	assert.match(h.streamCalls[0].system, /最多输出 4 行/, '提示词里应当带上配置的条数');
 });
 
+test('字符上限写进提示词：短祈使句是硬要求，不是等截断', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 3, maxSuggestionChars: 24 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	const sys = h.streamCalls[0].system;
+	assert.match(sys, /不超过 24 个字/, '要让模型按字数写，而不是写完被截断');
+	assert.match(sys, /短祈使句/);
+});
+
+test('只留 1 条时，「至少一条写没好」不再抢掉唯一坑位', async () => {
+	const h = await freshHarness();
+	await h.writeConfig({ maxSuggestions: 1, maxSuggestionChars: 24 });
+	const session = nextSession(ROUTE_A);
+	playTurn(h, session);
+	await waitForSuggestion(h, session.id);
+
+	const sys = h.streamCalls[0].system;
+	assert.match(sys, /只输出 1 行/, '1 条要明说只给一条');
+	assert.doesNotMatch(sys, /最多输出 1 行，每行一条，各覆盖一个不同方向/, '1 条时不该还要求覆盖多个方向');
+	assert.doesNotMatch(sys, /至少一条写这种反馈/, '1 条时"至少一条"会把唯一一条占掉');
+});
+
 test('条数调大时，输出上限自动抬到放得下（防止最后一条被截断）', async () => {
 	const h = await freshHarness();
 	await h.writeConfig({ maxSuggestions: 5, maxSuggestionChars: 120 });

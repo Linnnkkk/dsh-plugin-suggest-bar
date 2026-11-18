@@ -32,7 +32,7 @@ const STATS_ROUTE_PATH = '/api/suggest-bar/stats';
 const EVENT_ROUTE_PATH = '/api/suggest-bar/event';
 const PURPOSE = 'suggest-bar';
 /** 提示词版本：写进命中率记录，改提示词时手动改这里，统计才能按版本对比。 */
-const PROMPT_VERSION = 'v2.1-2026-11-15';
+const PROMPT_VERSION = 'v2.2-2026-11-18';
 // 数据目录默认就是插件目录本身。测试用 SUGGEST_BAR_DATA_DIR 指向临时目录，
 // 否则会读到真实的 config.json / suggestions.json，甚至把它们写坏。
 const DATA_DIR = process.env.SUGGEST_BAR_DATA_DIR ?? fileURLToPath(new URL('.', import.meta.url));
@@ -419,18 +419,31 @@ function noteTurn(sessionId, key, text) {
  * v2 提示词（2026-11-12 在 72 条真实会话样本上评测选出）：
  * 现行版爱出“好”“谢谢整理”这类空话；只加细节的版本又太长、爱把几件事串起来、编造细节。
  */
-function systemPrompt(count) {
-	return [
+function systemPrompt(count, maxChars) {
+	const lines = [
 		'你替用户预写他下一条要发的消息——本质是给助手下的一条指令，不是对上一句的回应。',
 		'每条都必须让助手去做一件具体的事：改哪个、查什么、跑什么、接着做哪一步、或解释什么。没有动作对象的话不要说（纯态度、纯评价、纯确认都不算）。',
 		'需要用户亲自动手的事（重启、点按钮、改文件），他要么做完才回（下一条带结果），要么直接说别的，不会回「好，我重启一下」。',
 		'只说用户真会发的：指令、纠正、要求下一步、追问、解释/诊断；状态汇报、观察、猜测、评价不写。',
 		'口吻照抄他最近几条：口语、直接、短，十个字能说完不用二十个。',
 		'助手让他选 → 写那个选项；助手做完 → 下一步做什么；助手卡住/有遗留 → 让它接着处理那件事。不替助手说话，不用「另外」「顺便」串多句。',
-		'助手说修好了/改完了，但效果得他亲眼看（界面、卡顿、真机、刷新后、音视频）→ 他常回「没好」：至少一条写这种反馈，带上具体现象（如「刷新了，还是卡」「顶部还是乱的」）。',
-		`最多输出 ${count} 行，每行一条，各覆盖一个不同方向（同意/纠正/追问/换思路/补充约束等），可能性从高到低；凑不出这么多不同方向就少给，不要换说法凑数；无序号、引号、Markdown、解释。`,
-		'都没把握就只输出 NONE。',
-	].join('\n');
+		// 用户是用眼睛扫一眼再决定点不点，长句没人看；实测短候选命中率是长候选的 4 倍
+		`每行必须是不超过 ${maxChars} 个字的短祈使句（硬上限，超了会被直接截断、句子就断了）：能四个字说清就四个字。主语（我/你）能省就省，不要解释为什么、不要补后半句。`,
+	];
+	if (count > 1) {
+		lines.push(
+			'助手说修好了/改完了，但效果得他亲眼看（界面、卡顿、真机、刷新后、音视频）→ 他常回「没好」：至少一条写这种反馈，带上具体现象（如「刷新了，还是卡」「顶部还是乱的」）。',
+			`最多输出 ${count} 行，每行一条，各覆盖一个不同方向（同意/纠正/追问/换思路/补充约束等），可能性从高到低；凑不出这么多不同方向就少给，不要换说法凑数；无序号、引号、Markdown、解释。`,
+		);
+	} else {
+		lines.push(
+			// 只有一条时，"至少一条写没好"会把唯一的坑位占掉；改成优先级提示
+			'只输出 1 行：写最可能的那一条。助手说做完了但效果得他亲眼看（界面、卡顿、真机、刷新后），优先写这种反馈并带上具体现象（如「刷新了，还是卡」）。',
+			'无序号、引号、Markdown、解释。',
+		);
+	}
+	lines.push('都没把握就只输出 NONE。');
+	return lines.join('\n');
 }
 
 /** 助手回复去噪：引用标记行（由配置指定）、代码块、表格对“猜下一句”没用，还会把结尾的提问挤出预算。 */
@@ -698,7 +711,7 @@ async function generate(ctx, seedConfig, session, turn) {
 				provider: route.provider,
 				model: route.model,
 				messages,
-				system: systemPrompt(config.maxSuggestions),
+				system: systemPrompt(config.maxSuggestions, config.maxSuggestionChars),
 				// 关思考时一句话 256 足够；只能带思考的模型需给推理留余量，否则必撞 max-tokens
 				// 上限必须放得下 N 条：否则条数一调大，最后一条会被静默截掉
 				maxTokens: Math.max(
